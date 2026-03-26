@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+.venv/
+
+# Git
+.git/
+
+# Data (exclude heavy files)
+data/
+dataset/
+*.csv
+*.xlsx
+*.parquet
+
+# MLflow & reports
+mlruns/
+reports/
+
+# IDE
+.idea/
+.vscode/
+
+# DB + env
+*.db
+.env
+
+# 🚨 IMPORTANT: exclude models (we download them in Docker)
+models/
+*.pkl

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Models (DO NOT PUSH)
+models/
+*.pkl
+
+# MLflow
+mlruns/
+
+# Data (DO NOT PUSH)
+data/
+dataset/
+*.csv
+*.xlsx
+*.parquet
+
+# Reports
+reports/
+
+# Database
+*.db
+
+# Environment variables
+.env
+
+# IDE
+.idea/
+.vscode/
