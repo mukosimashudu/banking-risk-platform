@@ -22,7 +22,7 @@ st.set_page_config(
     layout="wide",
 )
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL = "https://banking-risk-app-mukosi.onrender.com"
 
 API_PREDICT_URL = f"{API_BASE_URL}/predict"
 API_BATCH_PREDICT_URL = f"{API_BASE_URL}/predict/batch"
