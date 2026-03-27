@@ -5,7 +5,9 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install dependencies + SQL Server ODBC driver
+# ----------------------------------------
+# System dependencies + SQL Server driver
+# ----------------------------------------
 RUN apt-get update && apt-get install -y \
     curl \
     gnupg \
@@ -14,19 +16,46 @@ RUN apt-get update && apt-get install -y \
     unixodbc \
     unixodbc-dev \
     apt-transport-https \
+    wget \
     && curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
     && curl https://packages.microsoft.com/config/debian/12/prod.list > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y msodbcsql18 \
     && rm -rf /var/lib/apt/lists/*
 
+# ----------------------------------------
+# Install Python dependencies
+# ----------------------------------------
 COPY requirements.txt .
 
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install gdown (for Google Drive downloads)
+RUN pip install gdown
+
+# ----------------------------------------
+# Create models directory
+# ----------------------------------------
+RUN mkdir -p /app/models
+
+# ----------------------------------------
+# 🔥 Download models from Google Drive
+# ----------------------------------------
+RUN gdown --id 13xKr7FBBEgN2LqfAkvOWmnoIRmS4Lz0p -O /app/models/credit_model_best.pkl
+RUN gdown --id 1maIHAtaLHIV7xGHg-_SjL2w2Thxg0VI6 -O /app/models/fraud_model_best.pkl
+
+# ----------------------------------------
+# Copy project files
+# ----------------------------------------
 COPY . .
 
+# ----------------------------------------
+# Expose API port
+# ----------------------------------------
 EXPOSE 8000
 
+# ----------------------------------------
+# Run FastAPI
+# ----------------------------------------
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
