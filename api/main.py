@@ -5,6 +5,7 @@ from typing import List
 
 import joblib
 import pandas as pd
+import shap
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -12,18 +13,17 @@ from sqlalchemy import text
 
 
 # =========================================================
-# OPTIONAL DATABASE IMPORT
+# DATABASE
 # =========================================================
 DB_ENABLED = True
 DB_ERROR = None
 engine = None
 
 try:
-    from src.config.db import engine  # type: ignore
+    from src.config.db import engine
 except Exception as e:
     DB_ENABLED = False
     DB_ERROR = str(e)
-    print(f"[WARNING] Database disabled at startup: {DB_ERROR}")
 
 
 # =========================================================
@@ -32,67 +32,53 @@ except Exception as e:
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODEL_DIR = BASE_DIR / "models"
 
-FRAUD_MODEL_PATH = MODEL_DIR / "fraud_model_best.pkl"
-CREDIT_MODEL_PATH = MODEL_DIR / "credit_model_best.pkl"
+fraud_model = joblib.load(MODEL_DIR / "fraud_model_best.pkl")
+credit_model = joblib.load(MODEL_DIR / "credit_model_best.pkl")
 
-if not FRAUD_MODEL_PATH.exists():
-    raise FileNotFoundError(f"Fraud model not found: {FRAUD_MODEL_PATH}")
-
-if not CREDIT_MODEL_PATH.exists():
-    raise FileNotFoundError(f"Credit model not found: {CREDIT_MODEL_PATH}")
-
-fraud_model = joblib.load(FRAUD_MODEL_PATH)
-credit_model = joblib.load(CREDIT_MODEL_PATH)
+# 🔥 SHAP EXPLAINER (LOAD ONCE)
+credit_explainer = shap.Explainer(credit_model)
 
 
 # =========================================================
-# FASTAPI APP
+# FASTAPI
 # =========================================================
 app = FastAPI(
-    title="Banking Risk Decision API",
-    version="2.1.0",
-    description="Fraud + Credit Risk scoring API with optional SQL logging, KPI endpoints, monitoring, and batch scoring"
+    title="Banking Risk API",
+    version="3.0"
 )
 
 
 # =========================================================
-# PYDANTIC MODELS
+# REQUEST MODEL
 # =========================================================
 class LoanApplicationRequest(BaseModel):
-    # Fraud features
-    transaction_amt: float = Field(..., ge=0)
-    card1: float = Field(..., ge=0)
-    card2: float = Field(..., ge=0)
-    card3: float = Field(..., ge=0)
-    card5: float = Field(..., ge=0)
-    addr1: float = Field(..., ge=0)
-    addr2: float = Field(..., ge=0)
+    transaction_amt: float
+    card1: float
+    card2: float
+    card3: float
+    card5: float
+    addr1: float
+    addr2: float
 
-    # Credit features
-    utilization: float = Field(..., ge=0)
-    age: float = Field(..., ge=18)
-    late_30_59: float = Field(..., ge=0)
-    debt_ratio: float = Field(..., ge=0)
-    income: float = Field(..., ge=0)
-    open_credit: float = Field(..., ge=0)
-    late_90: float = Field(..., ge=0)
-    real_estate: float = Field(..., ge=0)
-    late_60_89: float = Field(..., ge=0)
-    dependents: float = Field(..., ge=0)
+    utilization: float
+    age: float
+    late_30_59: float
+    debt_ratio: float
+    income: float
+    open_credit: float
+    late_90: float
+    real_estate: float
+    late_60_89: float
+    dependents: float
 
-    # Optional business fields
-    monthly_expenses: float = Field(0, ge=0)
-    marital_status: str = Field("single")
-
-
-class ChatRequest(BaseModel):
-    question: str
+    monthly_expenses: float = 0
+    marital_status: str = "single"
 
 
 # =========================================================
 # FEATURE BUILDERS
 # =========================================================
-def build_fraud_features(data: LoanApplicationRequest) -> pd.DataFrame:
+def build_fraud_features(data):
     return pd.DataFrame([{
         "transaction_amt": data.transaction_amt,
         "card1": data.card1,
@@ -104,7 +90,7 @@ def build_fraud_features(data: LoanApplicationRequest) -> pd.DataFrame:
     }])
 
 
-def build_credit_features(data: LoanApplicationRequest) -> pd.DataFrame:
+def build_credit_features(data):
     return pd.DataFrame([{
         "utilization": data.utilization,
         "age": data.age,
@@ -120,159 +106,40 @@ def build_credit_features(data: LoanApplicationRequest) -> pd.DataFrame:
 
 
 # =========================================================
-# SCORING
+# SHAP FUNCTION
 # =========================================================
-def score_fraud(data: LoanApplicationRequest) -> float:
-    df = build_fraud_features(data)
-    return float(fraud_model.predict_proba(df)[0][1])
+def get_top_shap_features(df):
+    try:
+        shap_values = credit_explainer(df)
+
+        shap_df = pd.DataFrame({
+            "feature": df.columns,
+            "impact": shap_values.values[0]
+        })
+
+        shap_df["abs"] = shap_df["impact"].abs()
+        shap_df = shap_df.sort_values("abs", ascending=False).head(3)
+
+        return shap_df[["feature", "impact"]].to_dict(orient="records")
+
+    except Exception as e:
+        return []
 
 
-def score_credit(data: LoanApplicationRequest) -> float:
-    df = build_credit_features(data)
-    return float(credit_model.predict_proba(df)[0][1])
+# =========================================================
+# DECISION LOGIC
+# =========================================================
+def decision_logic(data, fraud_prob, credit_prob):
+    if fraud_prob > 0.7:
+        return "REJECT - FRAUD"
 
+    if credit_prob > 0.5:
+        return "REJECT - DEFAULT"
 
-def enhanced_credit_logic(
-    data: LoanApplicationRequest,
-    fraud_probability: float,
-    credit_probability: float
-) -> str:
-    disposable_income = data.income - data.monthly_expenses
-
-    if fraud_probability > 0.70:
-        return "REJECT - FRAUD RISK"
-
-    if data.income < 2000:
-        return "REJECT - LOW INCOME"
-
-    if disposable_income < 1000:
-        return "REJECT - LOW DISPOSABLE INCOME"
-
-    if data.debt_ratio > 0.60:
-        return "REJECT - HIGH DEBT RATIO"
-
-    if data.age < 21:
-        return "REJECT - AGE RISK"
-
-    if credit_probability > 0.50:
-        return "REJECT - DEFAULT RISK"
-
-    if data.marital_status.lower() not in {"single", "married", "divorced", "widowed"}:
-        return "REVIEW - INVALID MARITAL STATUS"
+    if data.debt_ratio > 0.6:
+        return "REJECT - HIGH DEBT"
 
     return "APPROVE"
-
-
-# =========================================================
-# DB HELPERS
-# =========================================================
-def db_available() -> bool:
-    return DB_ENABLED and engine is not None
-
-
-def save_prediction_to_sql(
-    data: LoanApplicationRequest,
-    fraud_probability: float,
-    credit_probability: float,
-    decision: str
-) -> None:
-    if not db_available():
-        print("[INFO] Database not available. Skipping SQL logging.")
-        return
-
-    insert_sql = text("""
-        INSERT INTO ml.prediction_log (
-            customer_id,
-            requested_amount,
-            probability_default,
-            fraud_score,
-            decision,
-            model_name,
-            model_version,
-            created_at
-        )
-        VALUES (
-            NULL,
-            :requested_amount,
-            :probability_default,
-            :fraud_score,
-            :decision,
-            :model_name,
-            :model_version,
-            :created_at
-        )
-    """)
-
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                insert_sql,
-                {
-                    "requested_amount": data.transaction_amt,
-                    "probability_default": credit_probability,
-                    "fraud_score": fraud_probability,
-                    "decision": decision,
-                    "model_name": "fraud_best + credit_best",
-                    "model_version": "v2.1",
-                    "created_at": datetime.now(),
-                }
-            )
-    except Exception as e:
-        print(f"[WARNING] Failed to save prediction to SQL: {e}")
-
-
-def run_chat_query(question: str):
-    if not db_available():
-        return {
-            "answer": "Database is currently unavailable, so chat metrics are temporarily disabled."
-        }
-
-    q = question.lower().strip()
-
-    if "how many approved" in q:
-        sql = "SELECT COUNT(*) AS total FROM ml.prediction_log WHERE decision = 'APPROVE'"
-    elif "how many rejected" in q:
-        sql = "SELECT COUNT(*) AS total FROM ml.prediction_log WHERE decision LIKE 'REJECT%'"
-    elif "how many qualify" in q:
-        sql = "SELECT COUNT(*) AS total FROM ml.prediction_log WHERE decision = 'APPROVE'"
-    elif "total applications" in q or "how many applications" in q:
-        sql = "SELECT COUNT(*) AS total FROM ml.prediction_log"
-    elif "average fraud" in q:
-        sql = "SELECT AVG(fraud_score) AS avg_fraud_score FROM ml.prediction_log"
-    elif "average credit" in q or "average default" in q:
-        sql = "SELECT AVG(probability_default) AS avg_probability_default FROM ml.prediction_log"
-    else:
-        return {
-            "answer": (
-                "I understand questions about approved, rejected, qualified, total applications, "
-                "average fraud score, and average default probability."
-            )
-        }
-
-    with engine.connect() as conn:
-        row = conn.execute(text(sql)).mappings().first()
-
-    return {"answer": dict(row) if row else {}}
-
-
-# =========================================================
-# RESPONSE HELPER
-# =========================================================
-def build_prediction_response(
-    application: LoanApplicationRequest,
-    fraud_probability: float,
-    credit_probability: float,
-    decision: str
-) -> dict:
-    return {
-        "fraud_probability": round(fraud_probability, 4),
-        "credit_probability": round(credit_probability, 4),
-        "decision": decision,
-        "salary": application.income,
-        "monthly_expenses": application.monthly_expenses,
-        "age": application.age,
-        "marital_status": application.marital_status
-    }
 
 
 # =========================================================
@@ -282,139 +149,32 @@ def build_prediction_response(
 def home():
     return {
         "message": "Banking Risk API is running",
-        "database_enabled": db_available(),
-        "database_error": DB_ERROR if not db_available() else None
+        "database_enabled": DB_ENABLED,
+        "database_error": DB_ERROR
     }
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "database_enabled": db_available(),
-        "database_error": DB_ERROR if not db_available() else None
-    }
-
-
-@app.get("/kpi/summary")
-def kpi_summary():
-    if not db_available():
-        return {
-            "total_applications": 0,
-            "total_approved": 0,
-            "total_rejected": 0,
-            "avg_credit_probability": 0,
-            "avg_fraud_probability": 0,
-            "note": "Database unavailable. KPI summary is disabled."
-        }
-
-    sql = text("""
-        SELECT
-            COUNT(*) AS total_applications,
-            SUM(CASE WHEN decision = 'APPROVE' THEN 1 ELSE 0 END) AS total_approved,
-            SUM(CASE WHEN decision LIKE 'REJECT%' THEN 1 ELSE 0 END) AS total_rejected,
-            AVG(probability_default) AS avg_credit_probability,
-            AVG(fraud_score) AS avg_fraud_probability
-        FROM ml.prediction_log
-    """)
-
-    with engine.connect() as conn:
-        row = conn.execute(sql).mappings().first()
-
-    return dict(row) if row else {}
-
-
-@app.get("/monitoring/summary")
-def monitoring_summary():
-    if not db_available():
-        return {
-            "total_predictions": 0,
-            "avg_fraud": 0,
-            "avg_credit": 0,
-            "first_prediction_at": None,
-            "last_prediction_at": None,
-            "note": "Database unavailable. Monitoring summary is disabled."
-        }
-
-    sql = text("""
-        SELECT
-            COUNT(*) AS total_predictions,
-            AVG(fraud_score) AS avg_fraud,
-            AVG(probability_default) AS avg_credit,
-            MIN(created_at) AS first_prediction_at,
-            MAX(created_at) AS last_prediction_at
-        FROM ml.prediction_log
-    """)
-
-    with engine.connect() as conn:
-        row = conn.execute(sql).mappings().first()
-
-    return dict(row) if row else {}
-
-
-@app.post("/chat/query")
-def chat_query(request: ChatRequest):
-    try:
-        return run_chat_query(request.question)
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Chat query failed: {str(e)}")
 
 
 @app.post("/predict")
-def predict(application: LoanApplicationRequest):
+def predict(data: LoanApplicationRequest):
     try:
-        fraud_probability = score_fraud(application)
-        credit_probability = score_credit(application)
-        decision = enhanced_credit_logic(application, fraud_probability, credit_probability)
+        fraud_df = build_fraud_features(data)
+        credit_df = build_credit_features(data)
 
-        save_prediction_to_sql(
-            data=application,
-            fraud_probability=fraud_probability,
-            credit_probability=credit_probability,
-            decision=decision
-        )
+        fraud_prob = float(fraud_model.predict_proba(fraud_df)[0][1])
+        credit_prob = float(credit_model.predict_proba(credit_df)[0][1])
 
-        return build_prediction_response(
-            application=application,
-            fraud_probability=fraud_probability,
-            credit_probability=credit_probability,
-            decision=decision
-        )
+        decision = decision_logic(data, fraud_prob, credit_prob)
+
+        # 🔥 SHAP HERE
+        top_features = get_top_shap_features(credit_df)
+
+        return {
+            "fraud_probability": round(fraud_prob, 4),
+            "credit_probability": round(credit_prob, 4),
+            "decision": decision,
+            "top_features": top_features
+        }
 
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
-
-
-@app.post("/predict/batch")
-def predict_batch(applications: List[LoanApplicationRequest]):
-    try:
-        results = []
-
-        for application in applications:
-            fraud_probability = score_fraud(application)
-            credit_probability = score_credit(application)
-            decision = enhanced_credit_logic(application, fraud_probability, credit_probability)
-
-            save_prediction_to_sql(
-                data=application,
-                fraud_probability=fraud_probability,
-                credit_probability=credit_probability,
-                decision=decision
-            )
-
-            results.append(
-                build_prediction_response(
-                    application=application,
-                    fraud_probability=fraud_probability,
-                    credit_probability=credit_probability,
-                    decision=decision
-                )
-            )
-
-        return {"results": results, "count": len(results)}
-
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Batch prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
