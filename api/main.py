@@ -1,7 +1,7 @@
 from pathlib import Path
 import traceback
 from datetime import datetime
-from typing import List
+import os
 
 import joblib
 import pandas as pd
@@ -10,19 +10,42 @@ import shap
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
 
 # ==============================
-# DATABASE (EDIT THIS)
+# DATABASE (PRODUCTION READY)
 # ==============================
-DB_CONNECTION = "mssql+pyodbc://YOUR_SERVER/YOUR_DB?driver=ODBC+Driver+18+for+SQL+Server&trusted_connection=yes"
+DB_SERVER = os.getenv("DB_SERVER")
+DB_DATABASE = os.getenv("DB_DATABASE")
+DB_USERNAME = os.getenv("DB_USERNAME")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
 
 try:
-    engine = create_engine(DB_CONNECTION)
+    connection_string = (
+        f"DRIVER={{{DB_DRIVER}}};"
+        f"SERVER={DB_SERVER};"
+        f"DATABASE={DB_DATABASE};"
+        f"UID={DB_USERNAME};"
+        f"PWD={DB_PASSWORD};"
+        "Encrypt=yes;"
+        "TrustServerCertificate=yes;"
+    )
+
+    params = quote_plus(connection_string)
+
+    engine = create_engine(
+        f"mssql+pyodbc:///?odbc_connect={params}",
+        fast_executemany=True
+    )
+
     DB_ENABLED = True
+
 except Exception as e:
     print("DB ERROR:", e)
     engine = None
     DB_ENABLED = False
+
 
 # ==============================
 # PATHS + MODELS
@@ -138,7 +161,7 @@ def save(d, fraud, credit, dec):
     try:
         with engine.begin() as conn:
             conn.execute(text("""
-            INSERT INTO prediction_log
+            INSERT INTO ml.prediction_log
             (requested_amount, fraud_score, probability_default, decision, created_at)
             VALUES (:amt, :fraud, :credit, :dec, :dt)
             """), {
@@ -156,11 +179,14 @@ def save(d, fraud, credit, dec):
 # ==============================
 @app.get("/")
 def home():
-    return {"status": "running", "db": DB_ENABLED}
-
-@app.get("/health")
-def health():
-    return {"ok": True}
+    try:
+        if DB_ENABLED:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return {"status": "running", "database": "connected"}
+        return {"status": "running", "database": "disabled"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.post("/predict")
 def predict(d: LoanApplication):
@@ -189,23 +215,13 @@ def kpi():
     if not DB_ENABLED:
         return {}
 
-    row = engine.execute(text("""
-        SELECT COUNT(*) total,
-        SUM(CASE WHEN decision='APPROVE' THEN 1 ELSE 0 END) approved,
-        AVG(fraud_score) avg_fraud,
-        AVG(probability_default) avg_credit
-        FROM prediction_log
-    """)).fetchone()
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT COUNT(*) total,
+            SUM(CASE WHEN decision='APPROVE' THEN 1 ELSE 0 END) approved,
+            AVG(fraud_score) avg_fraud,
+            AVG(probability_default) avg_credit
+            FROM ml.prediction_log
+        """)).fetchone()
 
-    return dict(row)
-
-@app.post("/chat/query")
-def chat(q: dict):
-    if not DB_ENABLED:
-        return {"answer": "DB not connected"}
-
-    if "approved" in q["question"].lower():
-        row = engine.execute(text("SELECT COUNT(*) total FROM prediction_log WHERE decision='APPROVE'")).fetchone()
-        return {"answer": dict(row)}
-
-    return {"answer": "Ask about approvals"}
+    return dict(row._mapping)

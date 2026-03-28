@@ -1,19 +1,25 @@
 from sqlalchemy import create_engine
+import os
 from urllib.parse import quote_plus
-from src.config.settings import DB_SERVER, DB_DATABASE, DB_DRIVER
 
-# Build ODBC connection string
+DB_SERVER = os.getenv("DB_SERVER")
+DB_DATABASE = os.getenv("DB_DATABASE")
+DB_USERNAME = os.getenv("DB_USERNAME")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+
 connection_string = (
     f"DRIVER={{{DB_DRIVER}}};"
     f"SERVER={DB_SERVER};"
     f"DATABASE={DB_DATABASE};"
-    "Trusted_Connection=yes;"
+    f"UID={DB_USERNAME};"
+    f"PWD={DB_PASSWORD};"
+    "Encrypt=yes;"
+    "TrustServerCertificate=yes;"
 )
 
-# Encode connection string properly
 params = quote_plus(connection_string)
 
-# Create SQLAlchemy engine
 engine = create_engine(
     f"mssql+pyodbc:///?odbc_connect={params}",
     fast_executemany=True
