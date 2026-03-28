@@ -35,7 +35,8 @@ if "top_features" not in st.session_state:
 # -------------------------------------------------
 # STYLE
 # -------------------------------------------------
-st.markdown("""
+st.markdown(
+    """
 <style>
 .block-container {
     padding-top: 1rem;
@@ -111,19 +112,24 @@ st.markdown("""
     font-size: 14px;
 }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # -------------------------------------------------
 # HELPERS
 # -------------------------------------------------
 def kpi_card(title, value, icon):
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="kpi-card">
         <div class="kpi-icon">{icon}</div>
         <div class="kpi-title">{title}</div>
         <div class="kpi-value">{value}</div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 def get_credit_band(credit_prob: float) -> str:
@@ -147,7 +153,6 @@ def get_fraud_band(fraud_prob: float) -> str:
 def build_reason_summary(result: dict, payload: dict):
     fraud_prob = float(result.get("fraud_probability", 0))
     credit_prob = float(result.get("credit_probability", 0))
-
     reasons = []
 
     if fraud_prob >= 0.70:
@@ -227,7 +232,8 @@ st.write("Fraud risk + credit risk + decision engine + explainability + monitori
 try:
     health = requests.get(API_HEALTH_URL, timeout=8)
     if health.status_code == 200:
-        st.success("✅ FastAPI connected")
+        health_json = health.json()
+        st.success(f"✅ FastAPI connected | DB: {health_json.get('database', 'unknown')}")
     else:
         st.warning("⚠️ FastAPI is running but health endpoint did not return 200")
 except Exception as e:
@@ -312,7 +318,7 @@ if st.button("🚀 Predict Decision", use_container_width=True):
         "late_60_89": late_60_89,
         "dependents": dependents,
         "monthly_expenses": monthly_expenses,
-        "marital_status": marital_status
+        "marital_status": marital_status,
     }
 
     try:
@@ -341,9 +347,9 @@ if st.session_state.result:
     payload = st.session_state.payload
     top_features = st.session_state.top_features
 
-    fraud_prob = float(result["fraud_probability"])
-    credit_prob = float(result["credit_probability"])
-    decision = result["decision"]
+    fraud_prob = float(result.get("fraud_probability", 0))
+    credit_prob = float(result.get("credit_probability", 0))
+    decision = result.get("decision", "UNKNOWN")
 
     st.success("✅ Prediction Complete")
 
@@ -362,7 +368,8 @@ if st.session_state.result:
     reasons_html = "".join([f"<span class='reason-chip'>{r}</span>" for r in reasons])
 
     st.subheader("📋 Decision Summary")
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <div class="{summary_class}">
         <div style="font-size:24px; font-weight:700; color:#f8fafc;">{decision}</div>
         <div class="small-text" style="margin-top:10px;">
@@ -377,7 +384,9 @@ if st.session_state.result:
             {reasons_html}
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     left, right = st.columns([1.2, 1])
 
@@ -415,15 +424,22 @@ if st.session_state.result:
 
         if top_features:
             top_df = pd.DataFrame(top_features).copy()
-            top_df["direction"] = top_df["impact"].apply(
-                lambda x: "Toward rejection" if x > 0 else "Toward approval"
-            )
 
-            st.dataframe(
-                top_df[["feature", "input_value", "impact", "direction"]],
-                use_container_width=True,
-                hide_index=True
-            )
+            if "impact" in top_df.columns:
+                top_df["direction"] = top_df["impact"].apply(
+                    lambda x: "Toward rejection" if x > 0 else "Toward approval"
+                )
+
+            display_cols = [c for c in ["feature", "input_value", "impact", "direction"] if c in top_df.columns]
+
+            if display_cols:
+                st.dataframe(
+                    top_df[display_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("Explainability data returned, but no displayable columns were found.")
 
             fig_top = make_top_feature_chart(top_features)
             if fig_top is not None:
@@ -440,15 +456,18 @@ if st.session_state.result:
         if top_features:
             notes = []
             for item in top_features[:3]:
-                direction_text = "pulled toward rejection" if item["impact"] > 0 else "supported approval"
+                feature = item.get("feature", "unknown_feature")
+                input_value = item.get("input_value", "N/A")
+                impact = item.get("impact", 0)
+                direction_text = "pulled toward rejection" if impact > 0 else "supported approval"
                 notes.append(
-                    f"- **{item['feature']}** with input value **{item['input_value']}** {direction_text}."
+                    f"- **{feature}** with input value **{input_value}** {direction_text}."
                 )
 
             st.markdown(
-                "The strongest drivers behind this decision were:\n\n" +
-                "\n".join(notes) +
-                "\n\nThis explanation comes from the deployed FastAPI backend, which keeps the Streamlit app lightweight while still providing interpretable results."
+                "The strongest drivers behind this decision were:\n\n"
+                + "\n".join(notes)
+                + "\n\nThis explanation comes from the deployed FastAPI backend, which keeps the Streamlit app lightweight while still providing interpretable results."
             )
         else:
             st.info("Top explanations will appear here after prediction.")
@@ -474,7 +493,7 @@ if uploaded_file is not None:
                 batch_results = pd.DataFrame(res.json()["results"])
                 combined = pd.concat(
                     [batch_df.reset_index(drop=True), batch_results.reset_index(drop=True)],
-                    axis=1
+                    axis=1,
                 )
 
                 st.success(f"Batch scoring completed for {len(combined)} records")
@@ -485,7 +504,7 @@ if uploaded_file is not None:
                     "⬇ Download Batch Results",
                     data=csv_bytes,
                     file_name="batch_prediction_results.csv",
-                    mime="text/csv"
+                    mime="text/csv",
                 )
             else:
                 st.error(f"Batch API Error: {res.status_code}")
@@ -507,10 +526,12 @@ try:
         m2.metric("Avg Fraud", round(float(mon.get("avg_fraud") or 0), 4))
         m3.metric("Avg Credit", round(float(mon.get("avg_credit") or 0), 4))
 
-        st.write({
-            "first_prediction_at": mon.get("first_prediction_at"),
-            "last_prediction_at": mon.get("last_prediction_at"),
-        })
+        st.write(
+            {
+                "first_prediction_at": mon.get("first_prediction_at"),
+                "last_prediction_at": mon.get("last_prediction_at"),
+            }
+        )
     else:
         st.warning("Monitoring endpoint not available.")
 except Exception as e:
