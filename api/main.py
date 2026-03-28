@@ -118,12 +118,13 @@ credit_model = joblib.load(MODEL_DIR / "credit_model_best.pkl")
 
 try:
     credit_explainer = shap.Explainer(credit_model)
-except Exception:
+except Exception as e:
+    print("SHAP INIT ERROR:", e)
     credit_explainer = None
 
 
 # =========================================================
-# REQUEST / RESPONSE SCHEMAS
+# REQUEST SCHEMAS
 # =========================================================
 class LoanApplication(BaseModel):
     transaction_amt: float
@@ -284,48 +285,61 @@ def score_one(application: LoanApplication) -> dict:
 
 
 # =========================================================
-# CHAT / ASSISTANT
+# DB SUMMARY
 # =========================================================
 def get_db_summary() -> dict:
+    default_summary = {
+        "total_applications": 0,
+        "total_approved": 0,
+        "total_rejected": 0,
+        "avg_credit_probability": 0.0,
+        "avg_fraud_probability": 0.0,
+        "first_prediction_at": None,
+        "last_prediction_at": None,
+    }
+
     if not DB_ENABLED or engine is None:
-        return {
-            "total_applications": 0,
-            "total_approved": 0,
-            "total_rejected": 0,
-            "avg_credit_probability": 0.0,
-            "avg_fraud_probability": 0.0,
-            "first_prediction_at": None,
-            "last_prediction_at": None,
-        }
+        return default_summary
 
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    COUNT(*) AS total_applications,
-                    SUM(CASE WHEN decision = 'APPROVE' THEN 1 ELSE 0 END) AS total_approved,
-                    SUM(CASE WHEN decision <> 'APPROVE' THEN 1 ELSE 0 END) AS total_rejected,
-                    AVG(probability_default) AS avg_credit_probability,
-                    AVG(fraud_score) AS avg_fraud_probability,
-                    MIN(created_at) AS first_prediction_at,
-                    MAX(created_at) AS last_prediction_at
-                FROM ml.prediction_log
-                """
-            )
-        ).fetchone()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS total_applications,
+                        SUM(CASE WHEN decision = 'APPROVE' THEN 1 ELSE 0 END) AS total_approved,
+                        SUM(CASE WHEN decision <> 'APPROVE' THEN 1 ELSE 0 END) AS total_rejected,
+                        AVG(probability_default) AS avg_credit_probability,
+                        AVG(fraud_score) AS avg_fraud_probability,
+                        MIN(created_at) AS first_prediction_at,
+                        MAX(created_at) AS last_prediction_at
+                    FROM ml.prediction_log
+                    """
+                )
+            ).fetchone()
 
-    data = dict(row._mapping)
+        if row is None:
+            return default_summary
 
-    for key in ["total_applications", "total_approved", "total_rejected"]:
-        data[key] = int(data[key] or 0)
+        data = dict(row._mapping)
 
-    for key in ["avg_credit_probability", "avg_fraud_probability"]:
-        data[key] = float(data[key] or 0.0)
+        data["total_applications"] = int(data.get("total_applications") or 0)
+        data["total_approved"] = int(data.get("total_approved") or 0)
+        data["total_rejected"] = int(data.get("total_rejected") or 0)
+        data["avg_credit_probability"] = float(data.get("avg_credit_probability") or 0.0)
+        data["avg_fraud_probability"] = float(data.get("avg_fraud_probability") or 0.0)
 
-    return data
+        return data
+
+    except Exception as e:
+        print("DB SUMMARY ERROR:", e)
+        return default_summary
 
 
+# =========================================================
+# CHAT HELPER
+# =========================================================
 def answer_chat_question(question: str) -> str:
     q = question.strip().lower()
     summary = get_db_summary()
@@ -424,14 +438,25 @@ def kpi_summary():
 
 @app.get("/monitoring/summary")
 def monitoring_summary():
-    summary = get_db_summary()
-    return {
-        "total_predictions": summary["total_applications"],
-        "avg_fraud": summary["avg_fraud_probability"],
-        "avg_credit": summary["avg_credit_probability"],
-        "first_prediction_at": summary["first_prediction_at"],
-        "last_prediction_at": summary["last_prediction_at"],
-    }
+    try:
+        summary = get_db_summary()
+
+        return {
+            "total_predictions": int(summary.get("total_applications") or 0),
+            "avg_fraud": float(summary.get("avg_fraud_probability") or 0.0),
+            "avg_credit": float(summary.get("avg_credit_probability") or 0.0),
+            "first_prediction_at": summary.get("first_prediction_at"),
+            "last_prediction_at": summary.get("last_prediction_at"),
+        }
+    except Exception as e:
+        print("MONITORING ERROR:", e)
+        return {
+            "total_predictions": 0,
+            "avg_fraud": 0.0,
+            "avg_credit": 0.0,
+            "first_prediction_at": None,
+            "last_prediction_at": None,
+        }
 
 
 @app.post("/chat/query")
