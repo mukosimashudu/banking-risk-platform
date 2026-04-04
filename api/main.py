@@ -1,7 +1,46 @@
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
 from src.config.db import engine
+from openai import OpenAI
+import os
 import uuid
+
+# =========================
+# OPENAI SETUP
+# =========================
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def generate_explanation(context: dict) -> str:
+    try:
+        prompt = f"""
+You are a senior banking credit risk analyst.
+
+Explain the decision professionally.
+
+Customer:
+- Credit Score: {context.get("credit_score")}
+- Income: {context.get("income")}
+- Debt: {context.get("debt")}
+- Decision: {context.get("decision")}
+- Risk: {context.get("risk")}
+
+Explain clearly why the decision was made.
+"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a banking risk expert."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"LLM unavailable: {str(e)}"
+
 
 app = FastAPI(title="Full Fintech Banking Platform API")
 
@@ -20,179 +59,7 @@ def health():
 
 
 # =========================
-# EXECUTIVE SUMMARY
-# =========================
-@app.get("/api/portfolio/summary")
-def get_summary():
-    try:
-        with engine.connect() as conn:
-
-            # =========================
-            # TOTAL COUNTS
-            # =========================
-            loan_count = conn.execute(text("""
-                SELECT COUNT(*) FROM dbo.loan_applications
-            """)).scalar() or 0
-
-            credit_count = conn.execute(text("""
-                SELECT COUNT(*) FROM dbo.credit_applications
-            """)).scalar() or 0
-
-            total_applications = loan_count + credit_count
-
-            # =========================
-            # APPROVALS
-            # =========================
-            loan_approved = conn.execute(text("""
-                SELECT COUNT(*) FROM dbo.loan_applications
-                WHERE final_decision = 'APPROVED'
-            """)).scalar() or 0
-
-            credit_approved = conn.execute(text("""
-                SELECT COUNT(*) FROM dbo.credit_applications
-                WHERE final_decision = 'APPROVED'
-            """)).scalar() or 0
-
-            total_approved = loan_approved + credit_approved
-
-            approval_rate = (
-                total_approved / total_applications
-                if total_applications > 0 else 0
-            )
-
-            # =========================
-            # EXPOSURE
-            # =========================
-            loan_exposure = conn.execute(text("""
-                SELECT SUM(approved_amount) FROM dbo.loan_applications
-            """)).scalar() or 0
-
-            credit_exposure = conn.execute(text("""
-                SELECT SUM(approved_limit) FROM dbo.credit_applications
-            """)).scalar() or 0
-
-            # =========================
-            # RISK METRICS
-            # =========================
-            avg_pd = conn.execute(text("""
-                SELECT AVG(risk_probability) FROM dbo.credit_applications
-            """)).scalar() or 0
-
-            avg_shap = conn.execute(text("""
-                SELECT AVG(shap_risk_probability) FROM dbo.loan_applications
-            """)).scalar() or 0
-
-            # =========================
-            # FRAUD (FROM DATASET)
-            # =========================
-            fraud = conn.execute(text("""
-                SELECT COUNT(*) FROM dbo.train_transaction WHERE isFraud = 1
-            """)).scalar() or 0
-
-            total_tx = conn.execute(text("""
-                SELECT COUNT(*) FROM dbo.train_transaction
-            """)).scalar() or 1
-
-            fraud_rate = fraud / total_tx if total_tx > 0 else 0
-
-        # =========================
-        # DISTRIBUTIONS
-        # =========================
-        product_distribution = [
-            {"product": "Loans", "count": loan_count},
-            {"product": "Credit", "count": credit_count},
-        ]
-
-        decision_distribution = [
-            {"decision": "Approved", "count": total_approved},
-            {"decision": "Declined", "count": total_applications - total_approved},
-        ]
-
-        fraud_distribution = [
-            {"alert_level": "Fraud", "count": fraud},
-            {"alert_level": "Normal", "count": total_tx - fraud},
-        ]
-
-        return {
-            "total_applications": total_applications,
-            "total_approved_cases": total_approved,
-            "approval_rate": approval_rate,
-            "total_lifetime_ecl": 0,
-
-            "total_approved_amount": loan_exposure,
-            "total_credit_limit": credit_exposure,
-
-            "average_pd_12m": avg_pd,
-            "average_fraud_score": fraud_rate,
-
-            "critical_alerts": fraud,
-            "high_alerts": int(fraud * 0.5),
-
-            "average_shap_risk_probability": avg_shap,
-
-            "product_distribution": product_distribution,
-            "decision_distribution": decision_distribution,
-            "fraud_distribution": fraud_distribution
-        }
-
-    except Exception as e:
-        print("🔥 SUMMARY ERROR:", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-# =========================
-# RECENT TRANSACTIONS (FRAUD DATA)
-# =========================
-@app.get("/api/portfolio/recent")
-def get_recent():
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT TOP 50
-                    TransactionID AS application_reference,
-                    TRY_CAST(TransactionAmt AS FLOAT) AS requested_amount,
-                    isFraud AS fraud_flag,
-                    ProductCD AS product_type
-                FROM dbo.train_transaction
-                ORDER BY TransactionID DESC
-            """))
-
-            return [dict(row._mapping) for row in result]
-
-    except Exception as e:
-        print("🔥 RECENT ERROR:", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# =========================
-# FRAUD MONITORING
-# =========================
-@app.get("/api/fraud/recent")
-def fraud_monitor():
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT TOP 100
-                    TransactionID,
-                    TRY_CAST(TransactionAmt AS FLOAT) AS TransactionAmt,
-                    isFraud,
-                    GETDATE() AS event_time,
-                    CASE 
-                        WHEN isFraud = 1 THEN 'Critical'
-                        ELSE 'Low'
-                    END AS alert_level,
-                    TRY_CAST(TransactionAmt AS FLOAT) / 1000.0 AS fraud_score
-                FROM dbo.train_transaction
-                ORDER BY TransactionID DESC
-            """))
-
-            return [dict(row._mapping) for row in result]
-
-    except Exception as e:
-        print("🔥 FRAUD ERROR:", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# =========================
-# LOAN APPLICATION (SAVE)
+# LOAN APPLICATION
 # =========================
 @app.post("/api/loan/assess")
 def loan_assess(payload: dict):
@@ -212,7 +79,7 @@ def loan_assess(payload: dict):
         risk_prob = round(1 - (score / 900), 2)
 
         # =========================
-        # 🔥 SHAP (SIMULATED REALISTIC)
+        # SHAP
         # =========================
         shap_features = [
             {"feature": "credit_score", "shap_value": round((650 - score) / 100, 3)},
@@ -221,14 +88,15 @@ def loan_assess(payload: dict):
         ]
 
         # =========================
-        # 🧠 LLM STYLE EXPLANATION
+        # REAL LLM
         # =========================
-        explanation = f"""
-        The loan decision is based on multiple risk factors. 
-        The applicant has a credit score of {score}, which {'supports approval' if score > 650 else 'increases risk'}.
-        The debt-to-income ratio is {round(dti,2)}, indicating {'good affordability' if dti < 0.4 else 'financial pressure'}.
-        Overall, the system {'approved' if decision == 'APPROVED' else 'declined'} the loan based on affordability and risk thresholds.
-        """
+        llm_text = generate_explanation({
+            "credit_score": score,
+            "income": income,
+            "debt": debt,
+            "decision": decision,
+            "risk": risk_prob
+        })
 
         return {
             "final_decision": decision,
@@ -237,7 +105,7 @@ def loan_assess(payload: dict):
             "ecl_lifetime": 0,
             "decision_reason": "Risk-based decision",
 
-            "llm_explanation": explanation.strip(),
+            "llm_explanation": llm_text,
 
             "fraud_event": {"alert_level": "LOW"},
 
@@ -253,8 +121,9 @@ def loan_assess(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # =========================
-# CREDIT APPLICATION (SAVE)
+# CREDIT APPLICATION
 # =========================
 @app.post("/api/credit/assess")
 def credit_assess(payload: dict):
@@ -279,14 +148,15 @@ def credit_assess(payload: dict):
         ]
 
         # =========================
-        # LLM STYLE TEXT
+        # REAL LLM
         # =========================
-        explanation = f"""
-        The credit application was evaluated using risk scoring models.
-        The customer has a credit score of {score}, which {'indicates strong creditworthiness' if score > 700 else 'suggests moderate risk'}.
-        Their affordability is {'healthy' if dti < 0.4 else 'constrained'} based on a debt-to-income ratio of {round(dti,2)}.
-        Based on these factors, the system {'approved' if decision == 'APPROVED' else 'declined'} the credit application.
-        """
+        llm_text = generate_explanation({
+            "credit_score": score,
+            "income": income,
+            "debt": debt,
+            "decision": decision,
+            "risk": risk
+        })
 
         return {
             "final_decision": decision,
@@ -294,7 +164,7 @@ def credit_assess(payload: dict):
             "risk_probability": risk,
             "decision_reason": "Credit scoring logic",
 
-            "llm_explanation": explanation.strip(),
+            "llm_explanation": llm_text,
 
             "shap_explanation": {
                 "available": True,
@@ -305,41 +175,3 @@ def credit_assess(payload: dict):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# =========================
-# RECENT LOANS
-# =========================
-@app.get("/api/loan/recent")
-def get_loans():
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT TOP 50 *
-                FROM dbo.loan_applications
-                ORDER BY created_at DESC
-            """))
-            return [dict(row._mapping) for row in result]
-
-    except Exception as e:
-        print("🔥 LOAN RECENT ERROR:", str(e))
-        return []
-
-
-# =========================
-# RECENT CREDIT
-# =========================
-@app.get("/api/credit/recent")
-def get_credit():
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text("""
-                SELECT TOP 50 *
-                FROM dbo.credit_applications
-                ORDER BY created_at DESC
-            """))
-            return [dict(row._mapping) for row in result]
-
-    except Exception as e:
-        print("🔥 CREDIT RECENT ERROR:", str(e))
-        return []
