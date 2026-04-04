@@ -1,468 +1,731 @@
-from pathlib import Path
-from datetime import datetime
-from typing import List
-from urllib.parse import quote_plus
+from __future__ import annotations
+
 import os
-import traceback
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 import joblib
 import pandas as pd
-import shap
-
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from sqlalchemy import create_engine, text
+from pydantic import BaseModel, Field
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    create_engine,
+    func,
+    insert,
+    select,
+)
+from sqlalchemy.engine import Engine
+
+from src.llm.llm_assistant import generate_explanation
+from src.scoring.decision_engine import make_credit_card_decision, make_final_decision
+from src.scoring.explainability import explain_application
+from src.scoring.fraud_monitor import build_fraud_event
+from src.scoring.ifrs9_engine import ifrs9_engine
+from src.scoring.loan_engine import affordability_engine, build_amortisation_schedule
 
 
-# =========================================================
-# APP
-# =========================================================
-app = FastAPI(title="Banking Risk API", version="1.0.0")
+app = FastAPI(
+    title="Full Fintech Banking Platform API",
+    version="5.0.0",
+    description="Loans, credit, IFRS 9, explainable AI, fraud monitoring, and executive dashboard APIs.",
+)
+
+metadata = MetaData()
+
+loan_applications = Table(
+    "loan_applications",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("application_reference", String(100), nullable=False),
+    Column("customer_name", String(200), nullable=False),
+    Column("product_type", String(50), nullable=False),
+    Column("requested_amount", Float, nullable=False),
+    Column("recommended_amount", Float, nullable=False),
+    Column("approved_amount", Float, nullable=False),
+    Column("annual_interest_rate", Float, nullable=False),
+    Column("term_months", Integer, nullable=False),
+    Column("monthly_payment", Float, nullable=False),
+    Column("total_interest", Float, nullable=False),
+    Column("total_repayment", Float, nullable=False),
+    Column("net_monthly_income", Float, nullable=False),
+    Column("monthly_expenses", Float, nullable=False),
+    Column("existing_debt_payments", Float, nullable=False),
+    Column("disposable_income", Float, nullable=False),
+    Column("debt_to_income_ratio", Float, nullable=False),
+    Column("expense_to_income_ratio", Float, nullable=False),
+    Column("max_affordable_payment", Float, nullable=False),
+    Column("stressed_monthly_payment", Float, nullable=False),
+    Column("property_value", Float, nullable=True),
+    Column("deposit", Float, nullable=True),
+    Column("ltv", Float, nullable=True),
+    Column("credit_score", Integer, nullable=False),
+    Column("fraud_score", Float, nullable=False),
+    Column("secured", Boolean, nullable=False),
+    Column("days_past_due", Integer, nullable=False),
+    Column("sicr_flag", Boolean, nullable=False),
+    Column("default_flag", Boolean, nullable=False),
+    Column("ifrs9_stage", String(20), nullable=False),
+    Column("pd_12m", Float, nullable=False),
+    Column("pd_lifetime", Float, nullable=False),
+    Column("lgd", Float, nullable=False),
+    Column("ead", Float, nullable=False),
+    Column("ecl_12m", Float, nullable=False),
+    Column("ecl_lifetime", Float, nullable=False),
+    Column("shap_risk_probability", Float, nullable=True),
+    Column("llm_explanation", String(4000), nullable=True),
+    Column("final_decision", String(50), nullable=False),
+    Column("decision_reason", String(500), nullable=False),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+)
+
+amortisation_schedule = Table(
+    "amortisation_schedule",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("application_reference", String(100), nullable=False),
+    Column("instalment_no", Integer, nullable=False),
+    Column("opening_balance", Float, nullable=False),
+    Column("instalment", Float, nullable=False),
+    Column("principal_component", Float, nullable=False),
+    Column("interest_component", Float, nullable=False),
+    Column("closing_balance", Float, nullable=False),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+)
+
+credit_applications = Table(
+    "credit_applications",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("application_reference", String(100), nullable=False),
+    Column("customer_name", String(200), nullable=False),
+    Column("product_type", String(50), nullable=False),
+    Column("net_monthly_income", Float, nullable=False),
+    Column("existing_debt_payments", Float, nullable=False),
+    Column("credit_score", Integer, nullable=False),
+    Column("risk_probability", Float, nullable=False),
+    Column("approved_limit", Float, nullable=False),
+    Column("final_decision", String(50), nullable=False),
+    Column("decision_reason", String(500), nullable=False),
+    Column("llm_explanation", String(4000), nullable=True),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+)
+
+fraud_events = Table(
+    "fraud_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("event_time", DateTime, nullable=False, default=datetime.utcnow),
+    Column("application_reference", String(100), nullable=False),
+    Column("customer_name", String(200), nullable=False),
+    Column("product_type", String(50), nullable=False),
+    Column("requested_amount", Float, nullable=False),
+    Column("fraud_score", Float, nullable=False),
+    Column("alert_level", String(20), nullable=False),
+    Column("final_decision", String(50), nullable=False),
+    Column("message", String(500), nullable=False),
+)
 
 
-# =========================================================
-# DATABASE CONFIG
-# =========================================================
-DB_SERVER = os.getenv("DB_SERVER")
-DB_DATABASE = os.getenv("DB_DATABASE")
-DB_USERNAME = os.getenv("DB_USERNAME")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+def get_db_url() -> str:
+    db_server = os.getenv("DB_SERVER")
+    db_database = os.getenv("DB_DATABASE")
+    db_username = os.getenv("DB_USERNAME")
+    db_password = os.getenv("DB_PASSWORD")
+    db_driver = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
 
-engine = None
-DB_ENABLED = False
-
-
-def init_engine():
-    global engine, DB_ENABLED
-
-    if not all([DB_SERVER, DB_DATABASE, DB_USERNAME, DB_PASSWORD]):
-        print("Database environment variables not fully set. Running without DB.")
-        engine = None
-        DB_ENABLED = False
-        return
-
-    try:
-        connection_string = (
-            f"DRIVER={{{DB_DRIVER}}};"
-            f"SERVER={DB_SERVER};"
-            f"DATABASE={DB_DATABASE};"
-            f"UID={DB_USERNAME};"
-            f"PWD={DB_PASSWORD};"
-            "Encrypt=yes;"
-            "TrustServerCertificate=yes;"
+    if all([db_server, db_database, db_username, db_password]):
+        driver = db_driver.replace(" ", "+")
+        return (
+            f"mssql+pyodbc://{db_username}:{db_password}@{db_server}/{db_database}"
+            f"?driver={driver}&Encrypt=yes&TrustServerCertificate=yes"
         )
 
-        params = quote_plus(connection_string)
-
-        engine = create_engine(
-            f"mssql+pyodbc:///?odbc_connect={params}",
-            fast_executemany=True,
-            pool_pre_ping=True,
-        )
-
-        DB_ENABLED = True
-        print("Database engine initialized successfully.")
-
-    except Exception as e:
-        print("DB INIT ERROR:", e)
-        engine = None
-        DB_ENABLED = False
+    return "sqlite:///banking_risk_platform.db"
 
 
-def ensure_prediction_log_table():
-    if not DB_ENABLED or engine is None:
-        return
+def get_engine() -> Engine:
+    return create_engine(get_db_url(), future=True)
 
-    create_sql = """
-    IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = 'ml')
-    BEGIN
-        EXEC('CREATE SCHEMA ml')
-    END;
 
-    IF OBJECT_ID('ml.prediction_log', 'U') IS NULL
-    BEGIN
-        CREATE TABLE ml.prediction_log (
-            id INT IDENTITY(1,1) PRIMARY KEY,
-            requested_amount FLOAT NULL,
-            fraud_score FLOAT NULL,
-            probability_default FLOAT NULL,
-            decision NVARCHAR(100) NULL,
-            created_at DATETIME2 NOT NULL DEFAULT SYSDATETIME()
-        );
-    END;
-    """
+engine = get_engine()
 
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(create_sql))
-        print("prediction_log table ready.")
-    except Exception as e:
-        print("TABLE INIT ERROR:", e)
+
+def init_db() -> None:
+    metadata.create_all(engine)
 
 
 @app.on_event("startup")
-def startup_event():
-    init_engine()
-    ensure_prediction_log_table()
+def startup_event() -> None:
+    init_db()
 
 
-# =========================================================
-# MODELS
-# =========================================================
-BASE_DIR = Path(__file__).resolve().parents[1]
-MODEL_DIR = BASE_DIR / "models"
-
-fraud_model = joblib.load(MODEL_DIR / "fraud_model_best.pkl")
-credit_model = joblib.load(MODEL_DIR / "credit_model_best.pkl")
-
-try:
-    credit_explainer = shap.Explainer(credit_model)
-except Exception as e:
-    print("SHAP INIT ERROR:", e)
-    credit_explainer = None
-
-
-# =========================================================
-# REQUEST SCHEMAS
-# =========================================================
-class LoanApplication(BaseModel):
-    transaction_amt: float
-    card1: float
-    card2: float
-    card3: float
-    card5: float
-    addr1: float
-    addr2: float
-
-    utilization: float
-    age: float
-    late_30_59: float
-    debt_ratio: float
-    income: float
-    open_credit: float
-    late_90: float
-    real_estate: float
-    late_60_89: float
-    dependents: float
-
-    monthly_expenses: float = 0.0
-    marital_status: str = "single"
+class LoanAssessmentRequest(BaseModel):
+    customer_name: str = Field(..., min_length=2)
+    product_type: str = Field(..., description="personal_loan, home_loan, vehicle_loan, credit_card")
+    requested_amount: float = Field(..., gt=0)
+    annual_interest_rate: float = Field(..., ge=0)
+    term_months: int = Field(..., gt=0)
+    net_monthly_income: float = Field(..., ge=0)
+    monthly_expenses: float = Field(..., ge=0)
+    existing_debt_payments: float = Field(..., ge=0)
+    credit_score: int = Field(..., ge=300, le=900)
+    fraud_score: float = Field(0.05, ge=0, le=1)
+    property_value: Optional[float] = Field(None, ge=0)
+    deposit: Optional[float] = Field(None, ge=0)
+    secured: bool = False
+    days_past_due: int = Field(0, ge=0)
+    sicr_flag: bool = False
+    default_flag: bool = False
+    affordability_factor: float = Field(0.70, gt=0, le=1)
+    debt_to_income_cap: float = Field(0.45, gt=0, le=1)
+    stress_rate_addon: float = Field(2.00, ge=0)
 
 
-class ChatQuery(BaseModel):
-    question: str
+class CreditAssessmentRequest(BaseModel):
+    customer_name: str = Field(..., min_length=2)
+    product_type: str = Field(default="credit_card")
+    net_monthly_income: float = Field(..., ge=0)
+    existing_debt_payments: float = Field(..., ge=0)
+    credit_score: int = Field(..., ge=300, le=900)
 
 
-# =========================================================
-# FEATURE BUILDERS
-# =========================================================
-def fraud_df(d: LoanApplication) -> pd.DataFrame:
-    return pd.DataFrame(
-        [{
-            "transaction_amt": d.transaction_amt,
-            "card1": d.card1,
-            "card2": d.card2,
-            "card3": d.card3,
-            "card5": d.card5,
-            "addr1": d.addr1,
-            "addr2": d.addr2,
-        }]
-    )
+def build_reference(product_type: str) -> str:
+    now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    prefix = (product_type or "APP").upper()[:4]
+    return f"{prefix}-{now}"
 
 
-def credit_df(d: LoanApplication) -> pd.DataFrame:
-    return pd.DataFrame(
-        [{
-            "utilization": d.utilization,
-            "age": d.age,
-            "late_30_59": d.late_30_59,
-            "debt_ratio": d.debt_ratio,
-            "income": d.income,
-            "open_loans": d.open_credit,
-            "late_90": d.late_90,
-            "real_estate_loans": d.real_estate,
-            "late_60_89": d.late_60_89,
-            "dependents": d.dependents,
-        }]
-    )
+def load_credit_model():
+    model_path = os.path.join("models", "credit_model_best.pkl")
+    if not os.path.exists(model_path):
+        return None
+    try:
+        return joblib.load(model_path)
+    except Exception:
+        return None
 
 
-# =========================================================
-# EXPLAINABILITY
-# =========================================================
-def get_shap(df: pd.DataFrame) -> list:
-    if credit_explainer is None:
-        return []
+def credit_model_probability(payload: CreditAssessmentRequest) -> float:
+    model = load_credit_model()
+    if model is None:
+        base = 0.50
+        if payload.credit_score >= 720:
+            base -= 0.20
+        elif payload.credit_score >= 660:
+            base -= 0.10
+        elif payload.credit_score < 580:
+            base += 0.15
+
+        dti = payload.existing_debt_payments / payload.net_monthly_income if payload.net_monthly_income > 0 else 1.0
+        base += max(0.0, dti - 0.20)
+        return max(0.0, min(1.0, base))
 
     try:
-        shap_values = credit_explainer(df)
-        values = shap_values.values[0]
-
-        explain_df = pd.DataFrame(
-            {
-                "feature": df.columns,
-                "input_value": df.iloc[0].values,
-                "impact": values,
-            }
-        )
-
-        explain_df["abs_impact"] = explain_df["impact"].abs()
-        explain_df = explain_df.sort_values("abs_impact", ascending=False).head(5)
-
-        return explain_df[["feature", "input_value", "impact"]].to_dict(orient="records")
-
-    except Exception as e:
-        print("SHAP ERROR:", e)
-        return []
-
-
-# =========================================================
-# DECISION ENGINE
-# =========================================================
-def decide(application: LoanApplication, fraud_prob: float, credit_prob: float) -> str:
-    disposable_income = application.income - application.monthly_expenses
-
-    if fraud_prob > 0.70:
-        return "REJECT - FRAUD"
-
-    if credit_prob > 0.50:
-        return "REJECT - DEFAULT"
-
-    if disposable_income < 1000:
-        return "REJECT - LOW INCOME"
-
-    return "APPROVE"
-
-
-# =========================================================
-# PERSISTENCE
-# =========================================================
-def save_prediction(application: LoanApplication, fraud_prob: float, credit_prob: float, decision: str) -> None:
-    if not DB_ENABLED or engine is None:
-        return
-
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO ml.prediction_log
-                    (requested_amount, fraud_score, probability_default, decision, created_at)
-                    VALUES (:amt, :fraud, :credit, :decision, :created_at)
-                    """
-                ),
+        df = pd.DataFrame(
+            [
                 {
-                    "amt": application.transaction_amt,
-                    "fraud": fraud_prob,
-                    "credit": credit_prob,
-                    "decision": decision,
-                    "created_at": datetime.now(),
-                },
-            )
-    except Exception as e:
-        print("SAVE ERROR:", e)
+                    "net_monthly_income": payload.net_monthly_income,
+                    "monthly_expenses": 0.0,
+                    "existing_debt_payments": payload.existing_debt_payments,
+                    "requested_amount": payload.net_monthly_income * 2.0,
+                    "annual_interest_rate": 0.0,
+                    "term_months": 12,
+                    "credit_score": payload.credit_score,
+                    "fraud_score": 0.05,
+                    "property_value": 0.0,
+                    "deposit": 0.0,
+                    "days_past_due": 0,
+                    "sicr_flag": 0,
+                    "default_flag": 0,
+                }
+            ]
+        )
+        if hasattr(model, "predict_proba"):
+            proba = model.predict_proba(df)[0]
+            if len(proba) > 1:
+                return float(proba[1])
+        pred = model.predict(df)
+        return float(pred[0])
+    except Exception:
+        return 0.50
 
 
-# =========================================================
-# CORE SCORING
-# =========================================================
-def score_one(application: LoanApplication) -> dict:
-    fraud_probability = float(fraud_model.predict_proba(fraud_df(application))[0][1])
-    credit_probability = float(credit_model.predict_proba(credit_df(application))[0][1])
-
-    decision = decide(application, fraud_probability, credit_probability)
-    top_features = get_shap(credit_df(application))
-
-    save_prediction(application, fraud_probability, credit_probability, decision)
-
-    return {
-        "fraud_probability": fraud_probability,
-        "credit_probability": credit_probability,
-        "decision": decision,
-        "top_features": top_features,
-    }
-
-
-# =========================================================
-# DB SUMMARY
-# =========================================================
-def get_db_summary() -> dict:
-    default_summary = {
-        "total_applications": 0,
-        "total_approved": 0,
-        "total_rejected": 0,
-        "avg_credit_probability": 0.0,
-        "avg_fraud_probability": 0.0,
-        "first_prediction_at": None,
-        "last_prediction_at": None,
-    }
-
-    if not DB_ENABLED or engine is None:
-        return default_summary
-
-    try:
-        with engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT
-                        COUNT(*) AS total_applications,
-                        SUM(CASE WHEN decision = 'APPROVE' THEN 1 ELSE 0 END) AS total_approved,
-                        SUM(CASE WHEN decision <> 'APPROVE' THEN 1 ELSE 0 END) AS total_rejected,
-                        AVG(probability_default) AS avg_credit_probability,
-                        AVG(fraud_score) AS avg_fraud_probability,
-                        MIN(created_at) AS first_prediction_at,
-                        MAX(created_at) AS last_prediction_at
-                    FROM ml.prediction_log
-                    """
-                )
-            ).fetchone()
-
-        if row is None:
-            return default_summary
-
-        data = dict(row._mapping)
-
-        data["total_applications"] = int(data.get("total_applications") or 0)
-        data["total_approved"] = int(data.get("total_approved") or 0)
-        data["total_rejected"] = int(data.get("total_rejected") or 0)
-        data["avg_credit_probability"] = float(data.get("avg_credit_probability") or 0.0)
-        data["avg_fraud_probability"] = float(data.get("avg_fraud_probability") or 0.0)
-
-        return data
-
-    except Exception as e:
-        print("DB SUMMARY ERROR:", e)
-        return default_summary
-
-
-# =========================================================
-# CHAT HELPER
-# =========================================================
-def answer_chat_question(question: str) -> str:
-    q = question.strip().lower()
-    summary = get_db_summary()
-
-    total = summary["total_applications"]
-    approved = summary["total_approved"]
-    rejected = summary["total_rejected"]
-    avg_credit = summary["avg_credit_probability"]
-    avg_fraud = summary["avg_fraud_probability"]
-
-    if total == 0:
-        return "There are no scored applications in the database yet."
-
-    if "approved" in q:
-        return f"Total approved applications: {approved} out of {total}."
-
-    if "rejected" in q:
-        return f"Total rejected applications: {rejected} out of {total}."
-
-    if "total" in q or "applications" in q:
-        return f"Total applications scored: {total}."
-
-    if "fraud" in q:
-        return f"Average fraud probability is {avg_fraud:.4f}."
-
-    if "credit" in q or "default" in q:
-        return f"Average credit probability is {avg_credit:.4f}."
-
-    if "qualify" in q or "approval rate" in q:
-        approval_rate = approved / total if total else 0.0
-        return f"Approval rate is {approval_rate:.2%}. Approved: {approved}, rejected: {rejected}."
-
-    return (
-        f"Summary: total applications = {total}, approved = {approved}, "
-        f"rejected = {rejected}, average fraud probability = {avg_fraud:.4f}, "
-        f"average credit probability = {avg_credit:.4f}."
-    )
-
-
-# =========================================================
-# ROUTES
-# =========================================================
 @app.get("/")
-def home():
-    return {
-        "status": "running",
-        "service": "Banking Risk API",
-        "database_enabled": DB_ENABLED,
-    }
+def root() -> Dict[str, str]:
+    return {"message": "Full Fintech Banking Platform API is running"}
 
 
 @app.get("/health")
-def health():
-    db_status = "disabled"
-
-    if DB_ENABLED and engine is not None:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            db_status = "connected"
-        except Exception as e:
-            db_status = f"error: {str(e)}"
-
-    return {
-        "status": "ok",
-        "database": db_status,
-    }
+def health() -> Dict[str, Any]:
+    return {"status": "ok", "database_backend": get_db_url().split("://")[0]}
 
 
-@app.post("/predict")
-def predict(application: LoanApplication):
+@app.post("/api/schema/init")
+def initialise_schema() -> Dict[str, str]:
+    init_db()
+    return {"message": "Database schema created successfully"}
+
+
+@app.post("/api/loan/assess")
+def assess_loan(payload: LoanAssessmentRequest):
     try:
-        return score_one(application)
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        result = affordability_engine(
+            net_monthly_income=payload.net_monthly_income,
+            monthly_expenses=payload.monthly_expenses,
+            existing_debt_payments=payload.existing_debt_payments,
+            requested_amount=payload.requested_amount,
+            annual_interest_rate=payload.annual_interest_rate,
+            term_months=payload.term_months,
+            affordability_factor=payload.affordability_factor,
+            debt_to_income_cap=payload.debt_to_income_cap,
+            stress_rate_addon=payload.stress_rate_addon,
+            property_value=payload.property_value,
+            deposit=payload.deposit,
+        )
 
+        ifrs9 = ifrs9_engine(
+            approved_amount=result.approved_amount,
+            credit_score=payload.credit_score,
+            product_type=payload.product_type,
+            secured=payload.secured,
+            days_past_due=payload.days_past_due,
+            significant_increase_in_credit_risk=payload.sicr_flag,
+            default_flag=payload.default_flag,
+            ltv=result.ltv,
+            ccf=1.0,
+        )
 
-@app.post("/predict/batch")
-def batch_predict(applications: List[LoanApplication]):
-    try:
-        results = [score_one(application) for application in applications]
+        final_decision, reason = make_final_decision(
+            product_type=payload.product_type,
+            requested_amount=payload.requested_amount,
+            approved_amount=result.approved_amount,
+            affordability_pass=result.affordability_pass,
+            fraud_score=payload.fraud_score,
+            credit_score=payload.credit_score,
+            ifrs9_stage=ifrs9.stage,
+            debt_to_income_ratio=result.debt_to_income_ratio,
+            ltv=result.ltv,
+        )
+
+        schedule = build_amortisation_schedule(
+            principal=result.approved_amount,
+            annual_interest_rate=payload.annual_interest_rate,
+            term_months=payload.term_months,
+        )
+
+        shap_explanation = explain_application(payload.model_dump())
+
+        llm_text = generate_explanation(
+            {
+                "product_type": payload.product_type,
+                "income": payload.net_monthly_income,
+                "expenses": payload.monthly_expenses,
+                "debt": payload.existing_debt_payments,
+                "credit_score": payload.credit_score,
+                "fraud_score": payload.fraud_score,
+                "requested": result.requested_amount,
+                "approved": result.approved_amount,
+                "monthly_payment": result.monthly_payment,
+                "pd": ifrs9.pd_12m,
+                "lgd": ifrs9.lgd,
+                "ecl": ifrs9.ecl_lifetime,
+                "stage": ifrs9.stage,
+                "decision": final_decision,
+                "reason": reason,
+            }
+        )
+
+        application_reference = build_reference(payload.product_type)
+
+        fraud_event = build_fraud_event(
+            application_reference=application_reference,
+            customer_name=payload.customer_name,
+            product_type=payload.product_type,
+            requested_amount=payload.requested_amount,
+            fraud_score=payload.fraud_score,
+            final_decision=final_decision,
+        )
+
+        with engine.begin() as conn:
+            conn.execute(
+                insert(loan_applications).values(
+                    application_reference=application_reference,
+                    customer_name=payload.customer_name,
+                    product_type=payload.product_type,
+                    requested_amount=result.requested_amount,
+                    recommended_amount=result.recommended_amount,
+                    approved_amount=result.approved_amount,
+                    annual_interest_rate=payload.annual_interest_rate,
+                    term_months=payload.term_months,
+                    monthly_payment=result.monthly_payment,
+                    total_interest=result.total_interest,
+                    total_repayment=result.total_repayment,
+                    net_monthly_income=payload.net_monthly_income,
+                    monthly_expenses=payload.monthly_expenses,
+                    existing_debt_payments=payload.existing_debt_payments,
+                    disposable_income=result.disposable_income,
+                    debt_to_income_ratio=result.debt_to_income_ratio,
+                    expense_to_income_ratio=result.expense_to_income_ratio,
+                    max_affordable_payment=result.max_affordable_payment,
+                    stressed_monthly_payment=result.stressed_monthly_payment,
+                    property_value=payload.property_value,
+                    deposit=payload.deposit,
+                    ltv=result.ltv,
+                    credit_score=payload.credit_score,
+                    fraud_score=payload.fraud_score,
+                    secured=payload.secured,
+                    days_past_due=payload.days_past_due,
+                    sicr_flag=payload.sicr_flag,
+                    default_flag=payload.default_flag,
+                    ifrs9_stage=ifrs9.stage,
+                    pd_12m=ifrs9.pd_12m,
+                    pd_lifetime=ifrs9.pd_lifetime,
+                    lgd=ifrs9.lgd,
+                    ead=ifrs9.ead,
+                    ecl_12m=ifrs9.ecl_12m,
+                    ecl_lifetime=ifrs9.ecl_lifetime,
+                    shap_risk_probability=shap_explanation.get("risk_probability"),
+                    llm_explanation=llm_text[:4000],
+                    final_decision=final_decision,
+                    decision_reason=reason,
+                    created_at=datetime.utcnow(),
+                )
+            )
+
+            if schedule:
+                conn.execute(
+                    insert(amortisation_schedule),
+                    [
+                        {
+                            "application_reference": application_reference,
+                            "instalment_no": row["instalment_no"],
+                            "opening_balance": row["opening_balance"],
+                            "instalment": row["instalment"],
+                            "principal_component": row["principal_component"],
+                            "interest_component": row["interest_component"],
+                            "closing_balance": row["closing_balance"],
+                            "created_at": datetime.utcnow(),
+                        }
+                        for row in schedule
+                    ],
+                )
+
+            conn.execute(
+                insert(fraud_events).values(
+                    event_time=datetime.utcnow(),
+                    application_reference=fraud_event["application_reference"],
+                    customer_name=fraud_event["customer_name"],
+                    product_type=fraud_event["product_type"],
+                    requested_amount=fraud_event["requested_amount"],
+                    fraud_score=fraud_event["fraud_score"],
+                    alert_level=fraud_event["alert_level"],
+                    final_decision=fraud_event["final_decision"],
+                    message=fraud_event["message"],
+                )
+            )
+
         return {
-            "count": len(results),
-            "results": results,
+            "application_reference": application_reference,
+            "customer_name": payload.customer_name,
+            "product_type": payload.product_type,
+            "final_decision": final_decision,
+            "decision_reason": reason,
+            "requested_amount": result.requested_amount,
+            "recommended_amount": result.recommended_amount,
+            "approved_amount": result.approved_amount,
+            "annual_interest_rate": payload.annual_interest_rate,
+            "term_months": payload.term_months,
+            "monthly_payment": result.monthly_payment,
+            "total_interest": result.total_interest,
+            "total_repayment": result.total_repayment,
+            "affordability_pass": result.affordability_pass,
+            "debt_to_income_ratio": result.debt_to_income_ratio,
+            "expense_to_income_ratio": result.expense_to_income_ratio,
+            "disposable_income": result.disposable_income,
+            "max_affordable_payment": result.max_affordable_payment,
+            "stressed_monthly_payment": result.stressed_monthly_payment,
+            "ltv": result.ltv,
+            "ifrs9_stage": ifrs9.stage,
+            "pd_12m": ifrs9.pd_12m,
+            "pd_lifetime": ifrs9.pd_lifetime,
+            "lgd": ifrs9.lgd,
+            "ead": ifrs9.ead,
+            "ecl_12m": ifrs9.ecl_12m,
+            "ecl_lifetime": ifrs9.ecl_lifetime,
+            "shap_explanation": shap_explanation,
+            "llm_explanation": llm_text,
+            "fraud_event": fraud_event,
+            "amortisation_schedule": schedule,
         }
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/kpi/summary")
-def kpi_summary():
-    return get_db_summary()
-
-
-@app.get("/monitoring/summary")
-def monitoring_summary():
+@app.post("/api/credit/assess")
+def assess_credit(payload: CreditAssessmentRequest):
     try:
-        summary = get_db_summary()
+        risk_probability = credit_model_probability(payload)
+        decision, approved_limit, reason = make_credit_card_decision(
+            income=payload.net_monthly_income,
+            debt=payload.existing_debt_payments,
+            credit_score=payload.credit_score,
+            risk_probability=risk_probability,
+        )
+
+        application_reference = build_reference(payload.product_type)
+
+        explanation = generate_explanation(
+            {
+                "product_type": payload.product_type,
+                "income": payload.net_monthly_income,
+                "expenses": 0.0,
+                "debt": payload.existing_debt_payments,
+                "credit_score": payload.credit_score,
+                "fraud_score": 0.0,
+                "requested": approved_limit,
+                "approved": approved_limit,
+                "monthly_payment": 0.0,
+                "pd": risk_probability,
+                "lgd": 0.65,
+                "ecl": approved_limit * risk_probability * 0.65,
+                "stage": "Stage 1",
+                "decision": decision,
+                "reason": reason,
+            }
+        )
+
+        with engine.begin() as conn:
+            conn.execute(
+                insert(credit_applications).values(
+                    application_reference=application_reference,
+                    customer_name=payload.customer_name,
+                    product_type=payload.product_type,
+                    net_monthly_income=payload.net_monthly_income,
+                    existing_debt_payments=payload.existing_debt_payments,
+                    credit_score=payload.credit_score,
+                    risk_probability=risk_probability,
+                    approved_limit=approved_limit,
+                    final_decision=decision,
+                    decision_reason=reason,
+                    llm_explanation=explanation[:4000],
+                    created_at=datetime.utcnow(),
+                )
+            )
 
         return {
-            "total_predictions": int(summary.get("total_applications") or 0),
-            "avg_fraud": float(summary.get("avg_fraud_probability") or 0.0),
-            "avg_credit": float(summary.get("avg_credit_probability") or 0.0),
-            "first_prediction_at": summary.get("first_prediction_at"),
-            "last_prediction_at": summary.get("last_prediction_at"),
-        }
-    except Exception as e:
-        print("MONITORING ERROR:", e)
-        return {
-            "total_predictions": 0,
-            "avg_fraud": 0.0,
-            "avg_credit": 0.0,
-            "first_prediction_at": None,
-            "last_prediction_at": None,
+            "application_reference": application_reference,
+            "customer_name": payload.customer_name,
+            "product_type": payload.product_type,
+            "final_decision": decision,
+            "decision_reason": reason,
+            "risk_probability": round(risk_probability, 6),
+            "approved_limit": round(float(approved_limit), 2),
+            "llm_explanation": explanation,
         }
 
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
-@app.post("/chat/query")
-def chat_query(payload: ChatQuery):
+
+@app.get("/api/portfolio/recent")
+def recent_applications(limit: int = 50):
     try:
-        return {"answer": answer_chat_question(payload.question)}
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        stmt = (
+            select(
+                loan_applications.c.application_reference,
+                loan_applications.c.customer_name,
+                loan_applications.c.product_type,
+                loan_applications.c.requested_amount,
+                loan_applications.c.approved_amount,
+                loan_applications.c.monthly_payment,
+                loan_applications.c.ifrs9_stage,
+                loan_applications.c.ecl_lifetime,
+                loan_applications.c.shap_risk_probability,
+                loan_applications.c.final_decision,
+                loan_applications.c.created_at,
+            )
+            .order_by(loan_applications.c.id.desc())
+            .limit(limit)
+        )
+
+        with engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+
+        return [dict(row) for row in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/credit/recent")
+def recent_credit_applications(limit: int = 50):
+    try:
+        stmt = (
+            select(
+                credit_applications.c.application_reference,
+                credit_applications.c.customer_name,
+                credit_applications.c.product_type,
+                credit_applications.c.risk_probability,
+                credit_applications.c.approved_limit,
+                credit_applications.c.final_decision,
+                credit_applications.c.created_at,
+            )
+            .order_by(credit_applications.c.id.desc())
+            .limit(limit)
+        )
+
+        with engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+
+        return [dict(row) for row in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/fraud/recent")
+def recent_fraud_events(limit: int = 100):
+    try:
+        stmt = (
+            select(
+                fraud_events.c.event_time,
+                fraud_events.c.application_reference,
+                fraud_events.c.customer_name,
+                fraud_events.c.product_type,
+                fraud_events.c.requested_amount,
+                fraud_events.c.fraud_score,
+                fraud_events.c.alert_level,
+                fraud_events.c.final_decision,
+                fraud_events.c.message,
+            )
+            .order_by(fraud_events.c.id.desc())
+            .limit(limit)
+        )
+
+        with engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+
+        return [dict(row) for row in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/portfolio/summary")
+def portfolio_summary():
+    try:
+        with engine.begin() as conn:
+            total_loan_apps = conn.execute(select(func.count()).select_from(loan_applications)).scalar() or 0
+            total_credit_apps = conn.execute(select(func.count()).select_from(credit_applications)).scalar() or 0
+            total_apps = int(total_loan_apps) + int(total_credit_apps)
+
+            total_approved_loans = (
+                conn.execute(
+                    select(func.count()).select_from(loan_applications).where(
+                        loan_applications.c.final_decision.in_(["Approve", "Approve with Reduced Amount"])
+                    )
+                ).scalar()
+                or 0
+            )
+
+            total_approved_credit = (
+                conn.execute(
+                    select(func.count()).select_from(credit_applications).where(
+                        credit_applications.c.final_decision.in_(["Approve", "Approve with Limit"])
+                    )
+                ).scalar()
+                or 0
+            )
+
+            total_approved_cases = int(total_approved_loans) + int(total_approved_credit)
+
+            total_approved_amount = (
+                conn.execute(select(func.coalesce(func.sum(loan_applications.c.approved_amount), 0.0))).scalar()
+                or 0.0
+            )
+
+            total_credit_limit = (
+                conn.execute(select(func.coalesce(func.sum(credit_applications.c.approved_limit), 0.0))).scalar()
+                or 0.0
+            )
+
+            total_ecl = (
+                conn.execute(select(func.coalesce(func.sum(loan_applications.c.ecl_lifetime), 0.0))).scalar()
+                or 0.0
+            )
+
+            avg_pd = (
+                conn.execute(select(func.coalesce(func.avg(loan_applications.c.pd_12m), 0.0))).scalar()
+                or 0.0
+            )
+
+            avg_shap_risk = (
+                conn.execute
+                (select(func.coalesce(func.avg(loan_applications.c.shap_risk_probability), 0.0))).scalar()
+                or 0.0
+            )
+
+            avg_fraud_score = (
+                conn.execute(select(func.coalesce(func.avg(fraud_events.c.fraud_score), 0.0))).scalar()
+                or 0.0
+            )
+
+            critical_alerts = (
+                conn.execute(
+                    select(func.count()).select_from(fraud_events).where(fraud_events.c.alert_level == "Critical")
+                ).scalar()
+                or 0
+            )
+
+            high_alerts = (
+                conn.execute(
+                    select(func.count()).select_from(fraud_events).where(fraud_events.c.alert_level == "High")
+                ).scalar()
+                or 0
+            )
+
+            product_rows = conn.execute(
+                select(
+                    loan_applications.c.product_type,
+                    func.count().label("count"),
+                ).group_by(loan_applications.c.product_type)
+            ).all()
+
+            decision_rows = conn.execute(
+                select(
+                    loan_applications.c.final_decision,
+                    func.count().label("count"),
+                ).group_by(loan_applications.c.final_decision)
+            ).all()
+
+            fraud_rows = conn.execute(
+                select(
+                    fraud_events.c.alert_level,
+                    func.count().label("count"),
+                ).group_by(fraud_events.c.alert_level)
+            ).all()
+
+        return {
+            "total_applications": total_apps,
+            "total_approved_cases": total_approved_cases,
+            "approval_rate": round((total_approved_cases / total_apps), 4) if total_apps else 0.0,
+            "total_approved_amount": round(float(total_approved_amount), 2),
+            "total_credit_limit": round(float(total_credit_limit), 2),
+            "total_lifetime_ecl": round(float(total_ecl), 2),
+            "average_pd_12m": round(float(avg_pd), 6),
+            "average_shap_risk_probability": round(float(avg_shap_risk), 6),
+            "average_fraud_score": round(float(avg_fraud_score), 6),
+            "critical_alerts": int(critical_alerts),
+            "high_alerts": int(high_alerts),
+            "product_distribution": [{"product": r[0], "count": int(r[1])} for r in product_rows],
+            "decision_distribution": [{"decision": r[0], "count": int(r[1])} for r in decision_rows],
+            "fraud_distribution": [{"alert_level": r[0], "count": int(r[1])} for r in fraud_rows],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

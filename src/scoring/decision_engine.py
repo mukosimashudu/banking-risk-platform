@@ -1,36 +1,77 @@
-import joblib
-import numpy as np
-from pathlib import Path
+from __future__ import annotations
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-
-fraud_model = joblib.load(BASE_DIR / "models/fraud_model_best.pkl")
-credit_model = joblib.load(BASE_DIR / "models/credit_model_best.pkl")
+from typing import Optional, Tuple
 
 
-def predict_fraud(features):
-    prob = fraud_model.predict_proba([features])[0][1]
-    return prob
+def make_final_decision(
+    product_type: str,
+    requested_amount: float,
+    approved_amount: float,
+    affordability_pass: bool,
+    fraud_score: float,
+    credit_score: int,
+    ifrs9_stage: str,
+    debt_to_income_ratio: float,
+    ltv: Optional[float],
+) -> Tuple[str, str]:
+    reasons = []
+
+    if fraud_score >= 0.85:
+        return "Decline", "Very high fraud risk"
+
+    if approved_amount <= 0:
+        return "Decline", "No affordable amount available"
+
+    if not affordability_pass:
+        reasons.append("stress affordability failed")
+
+    if debt_to_income_ratio > 0.50:
+        reasons.append("high debt-to-income ratio")
+
+    if credit_score < 560:
+        reasons.append("weak credit score")
+
+    if ifrs9_stage == "Stage 3":
+        reasons.append("credit impaired exposure")
+
+    if product_type == "home_loan" and ltv is not None and ltv > 0.95:
+        reasons.append("high loan-to-value ratio")
+
+    if fraud_score >= 0.60:
+        reasons.append("elevated fraud risk")
+
+    if ifrs9_stage == "Stage 2" and approved_amount == requested_amount:
+        return "Refer", "Significant increase in credit risk; manual review required"
+
+    if approved_amount < requested_amount:
+        if reasons:
+            return "Approve with Reduced Amount", "; ".join(reasons)
+        return "Approve with Reduced Amount", "Requested amount reduced to affordable level"
+
+    if reasons:
+        return "Refer", "; ".join(reasons)
+
+    return "Approve", "Application passes affordability, credit, and IFRS 9 checks"
 
 
-def predict_credit(features):
-    prob = credit_model.predict_proba([features])[0][1]
-    return prob
+def make_credit_card_decision(
+    income: float,
+    debt: float,
+    credit_score: int,
+    risk_probability: float,
+) -> tuple[str, float, str]:
+    dti = debt / income if income > 0 else 1.0
 
+    if risk_probability >= 0.65 or credit_score < 540:
+        return "Reject", 0.0, "High credit risk"
 
-def make_decision(fraud_features, credit_features):
-    fraud_prob = predict_fraud(fraud_features)
-    credit_prob = predict_credit(credit_features)
+    if dti > 0.50:
+        return "Reject", 0.0, "Debt burden too high"
 
-    if fraud_prob > 0.7:
-        decision = "REJECT - FRAUD RISK"
-    elif credit_prob > 0.5:
-        decision = "REJECT - CREDIT RISK"
-    else:
-        decision = "APPROVE"
+    if risk_probability >= 0.45 or credit_score < 620:
+        return "Approve with Limit", income * 1.5, "Moderate risk profile"
 
-    return {
-        "fraud_probability": round(fraud_prob, 4),
-        "credit_probability": round(credit_prob, 4),
-        "decision": decision
-    }
+    if risk_probability >= 0.25 or credit_score < 680:
+        return "Approve", income * 2.0, "Acceptable risk profile"
+
+    return "Approve", income * 3.0, "Strong profile"

@@ -2,7 +2,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
-from src.scoring.explain import explain_credit
+from src.scoring.explainability import explain_credit
 from src.scoring.decision_engine import make_decision
 
 BASE_DIR = Path(__file__).resolve().parents[2]
