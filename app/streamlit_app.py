@@ -181,6 +181,80 @@ def build_summary_defaults() -> dict:
     }
 
 
+def build_shap_summary(shap_features: list[dict]) -> str:
+    if not shap_features:
+        return "No explainability drivers were returned."
+
+    try:
+        shap_df = pd.DataFrame(shap_features)
+        if shap_df.empty or "feature" not in shap_df.columns or "shap_value" not in shap_df.columns:
+            return "No explainability drivers were returned."
+
+        shap_df["abs_impact"] = shap_df["shap_value"].abs()
+        shap_df = shap_df.sort_values("abs_impact", ascending=False)
+
+        lines = []
+        for _, row in shap_df.head(3).iterrows():
+            direction = "increased risk" if row["shap_value"] > 0 else "reduced risk"
+            lines.append(f"{row['feature']} {direction} (impact {row['shap_value']:.3f})")
+
+        return "; ".join(lines)
+    except Exception:
+        return "Explainability output could not be summarised."
+
+
+def loan_officer_answer(
+    question: str,
+    result: dict,
+    shap_block: dict,
+    extra_context: dict | None = None,
+) -> str:
+    extra_context = extra_context or {}
+
+    decision = str(result.get("final_decision", "N/A"))
+    decision_reason = str(result.get("decision_reason", "No decision reason returned."))
+    llm_text = str(result.get("llm_explanation", "No narrative returned."))
+    risk_probability = safe_float(shap_block.get("risk_probability"))
+    fraud_alert = str(result.get("fraud_event", {}).get("alert_level", "N/A"))
+    shap_summary = build_shap_summary(shap_block.get("top_features", []))
+
+    approved_amount = money(result.get("approved_amount"))
+    approved_limit = money(result.get("approved_limit"))
+    monthly_payment = money(result.get("monthly_payment"))
+    dti_ratio = pct(result.get("debt_to_income_ratio"))
+    stage = str(result.get("ifrs9_stage", "N/A"))
+
+    answers = {
+        "Why was this application approved or declined?": (
+            f"The decision was **{decision}**. "
+            f"Primary reason: {decision_reason}. "
+            f"The narrative from the model says: {llm_text}"
+        ),
+        "What were the top risk drivers?": (
+            f"Top model drivers: {shap_summary}. "
+            f"Estimated model risk probability is {pct(risk_probability)}."
+        ),
+        "How risky is this applicant?": (
+            f"The estimated model risk probability is {pct(risk_probability)}. "
+            f"Fraud alert level is **{fraud_alert}**. "
+            f"Credit / affordability narrative: {llm_text}"
+        ),
+        "Summarise this decision for a credit committee.": (
+            f"Committee summary: decision = **{decision}**. "
+            f"Decision rationale = {decision_reason}. "
+            f"Key drivers = {shap_summary}. "
+            f"Fraud alert = {fraud_alert}. "
+            f"IFRS 9 stage = {stage}. "
+            f"Approved amount = {approved_amount}. "
+            f"Approved limit = {approved_limit}. "
+            f"Monthly payment = {monthly_payment}. "
+            f"DTI ratio = {dti_ratio}."
+        ),
+    }
+
+    return answers.get(question, "No assistant answer available.")
+
+
 # ---------------------------
 # App header
 # ---------------------------
@@ -358,6 +432,9 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Loan Application")
 
+    if "latest_loan_result" not in st.session_state:
+        st.session_state.latest_loan_result = None
+
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -418,57 +495,83 @@ with tabs[1]:
 
         try:
             result = api_post("/api/loan/assess", payload)
-
-            r1, r2, r3, r4 = st.columns(4)
-            r1.metric("Final Decision", result.get("final_decision", "N/A"))
-            r2.metric("Approved Amount", money(result.get("approved_amount")))
-            r3.metric("Monthly Payment", money(result.get("monthly_payment")))
-            r4.metric("Lifetime ECL", money(result.get("ecl_lifetime")))
-
-            st.info(result.get("decision_reason", "No decision reason returned."))
-
-            rr1, rr2, rr3, rr4 = st.columns(4)
-            rr1.metric("Disposable Income", money(result.get("disposable_income")))
-            rr2.metric("DTI Ratio", pct(result.get("debt_to_income_ratio")))
-            rr3.metric("IFRS 9 Stage", str(result.get("ifrs9_stage", "N/A")))
-            fraud_event = result.get("fraud_event", {})
-            rr4.metric("Fraud Alert", str(fraud_event.get("alert_level", "N/A")))
-
-            st.markdown("### Credit Narrative")
-            st.write(result.get("llm_explanation", "No narrative returned."))
-
-            st.markdown("### Explainable AI")
-            shap_block = result.get("shap_explanation", {})
-            if shap_block.get("available"):
-                st.metric("Risk Probability", pct(shap_block.get("risk_probability")))
-                shap_df = pd.DataFrame(shap_block.get("top_features", []))
-                if not shap_df.empty:
-                    if "abs_impact" not in shap_df.columns and "shap_value" in shap_df.columns:
-                        shap_df["abs_impact"] = shap_df["shap_value"].abs()
-                    plot_horizontal_bar(
-                        shap_df,
-                        "feature",
-                        "shap_value",
-                        "Top Risk Drivers"
-                    )
-                    st.dataframe(shap_df, use_container_width=True)
-            else:
-                st.info("Explainability output not available for this decision.")
-
-            st.markdown("### Fraud Event")
-            st.json(fraud_event)
-
-            schedule_df = pd.DataFrame(result.get("amortisation_schedule", []))
-            if not schedule_df.empty:
-                st.markdown("### Amortisation Schedule")
-                st.dataframe(schedule_df, use_container_width=True)
-
-                chart_cols = [c for c in ["opening_balance", "closing_balance"] if c in schedule_df.columns]
-                if "instalment_no" in schedule_df.columns and chart_cols:
-                    st.line_chart(schedule_df.set_index("instalment_no")[chart_cols])
-
+            st.session_state.latest_loan_result = result
         except Exception as exc:
             st.error(f"Loan assessment failed: {exc}")
+
+    result = st.session_state.latest_loan_result
+
+    if result:
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Final Decision", result.get("final_decision", "N/A"))
+        r2.metric("Approved Amount", money(result.get("approved_amount")))
+        r3.metric("Monthly Payment", money(result.get("monthly_payment")))
+        r4.metric("Lifetime ECL", money(result.get("ecl_lifetime")))
+
+        st.info(result.get("decision_reason", "No decision reason returned."))
+
+        rr1, rr2, rr3, rr4 = st.columns(4)
+        rr1.metric("Disposable Income", money(result.get("disposable_income")))
+        rr2.metric("DTI Ratio", pct(result.get("debt_to_income_ratio")))
+        rr3.metric("IFRS 9 Stage", str(result.get("ifrs9_stage", "N/A")))
+        fraud_event = result.get("fraud_event", {})
+        rr4.metric("Fraud Alert", str(fraud_event.get("alert_level", "N/A")))
+
+        st.markdown("### Credit Narrative")
+        st.write(result.get("llm_explanation", "No narrative returned."))
+
+        st.markdown("### Explainable AI")
+        shap_block = result.get("shap_explanation", {})
+        if shap_block.get("available"):
+            st.metric("Risk Probability", pct(shap_block.get("risk_probability")))
+            shap_df = pd.DataFrame(shap_block.get("top_features", []))
+            if not shap_df.empty:
+                if "abs_impact" not in shap_df.columns and "shap_value" in shap_df.columns:
+                    shap_df["abs_impact"] = shap_df["shap_value"].abs()
+                plot_horizontal_bar(
+                    shap_df,
+                    "feature",
+                    "shap_value",
+                    "Top Risk Drivers"
+                )
+                st.dataframe(shap_df, use_container_width=True)
+        else:
+            st.info("Explainability output not available for this decision.")
+
+        st.markdown("### Loan Officer Assistant")
+        loan_question = st.selectbox(
+            "Ask a quick question about this loan decision",
+            [
+                "Why was this application approved or declined?",
+                "What were the top risk drivers?",
+                "How risky is this applicant?",
+                "Summarise this decision for a credit committee.",
+            ],
+            key="loan_question"
+        )
+        st.write(
+            loan_officer_answer(
+                loan_question,
+                result,
+                shap_block,
+                extra_context={
+                    "requested_amount": requested_amount,
+                    "term_months": term_months,
+                }
+            )
+        )
+
+        st.markdown("### Fraud Event")
+        st.json(fraud_event)
+
+        schedule_df = pd.DataFrame(result.get("amortisation_schedule", []))
+        if not schedule_df.empty:
+            st.markdown("### Amortisation Schedule")
+            st.dataframe(schedule_df, use_container_width=True)
+
+            chart_cols = [c for c in ["opening_balance", "closing_balance"] if c in schedule_df.columns]
+            if "instalment_no" in schedule_df.columns and chart_cols:
+                st.line_chart(schedule_df.set_index("instalment_no")[chart_cols])
 
 
 # ---------------------------
@@ -476,6 +579,9 @@ with tabs[1]:
 # ---------------------------
 with tabs[2]:
     st.subheader("Credit Application")
+
+    if "latest_credit_result" not in st.session_state:
+        st.session_state.latest_credit_result = None
 
     cc1, cc2 = st.columns(2)
 
@@ -499,19 +605,64 @@ with tabs[2]:
 
         try:
             result = api_post("/api/credit/assess", payload)
-
-            x1, x2, x3 = st.columns(3)
-            x1.metric("Final Decision", result.get("final_decision", "N/A"))
-            x2.metric("Approved Limit", money(result.get("approved_limit")))
-            x3.metric("Risk Probability", pct(result.get("risk_probability")))
-
-            st.info(result.get("decision_reason", "No decision reason returned."))
-
-            st.markdown("### Credit Narrative")
-            st.write(result.get("llm_explanation", "No narrative returned."))
-
+            st.session_state.latest_credit_result = result
         except Exception as exc:
             st.error(f"Credit assessment failed: {exc}")
+
+    result = st.session_state.latest_credit_result
+
+    if result:
+        x1, x2, x3 = st.columns(3)
+        x1.metric("Final Decision", result.get("final_decision", "N/A"))
+        x2.metric("Approved Limit", money(result.get("approved_limit")))
+        x3.metric("Risk Probability", pct(result.get("risk_probability")))
+
+        st.info(result.get("decision_reason", "No decision reason returned."))
+
+        st.markdown("### Credit Narrative")
+        st.write(result.get("llm_explanation", "No narrative returned."))
+
+        st.markdown("### Explainable AI")
+        shap_block = result.get("shap_explanation", {})
+        if shap_block.get("available"):
+            st.metric("Risk Probability", pct(shap_block.get("risk_probability")))
+            shap_df = pd.DataFrame(shap_block.get("top_features", []))
+            if not shap_df.empty:
+                if "abs_impact" not in shap_df.columns and "shap_value" in shap_df.columns:
+                    shap_df["abs_impact"] = shap_df["shap_value"].abs()
+                plot_horizontal_bar(
+                    shap_df,
+                    "feature",
+                    "shap_value",
+                    "Top Credit Risk Drivers"
+                )
+                st.dataframe(shap_df, use_container_width=True)
+        else:
+            st.info("Explainability output not available for this decision.")
+
+        st.markdown("### Loan Officer Assistant")
+        credit_question = st.selectbox(
+            "Ask a quick question about this credit decision",
+            [
+                "Why was this application approved or declined?",
+                "What were the top risk drivers?",
+                "How risky is this applicant?",
+                "Summarise this decision for a credit committee.",
+            ],
+            key="credit_question"
+        )
+        st.write(
+            loan_officer_answer(
+                credit_question,
+                result,
+                shap_block,
+                extra_context={
+                    "income": cc_income,
+                    "debt": cc_debt,
+                    "score": cc_score,
+                }
+            )
+        )
 
 
 # ---------------------------
