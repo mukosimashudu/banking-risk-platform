@@ -9,7 +9,7 @@ import requests
 import streamlit as st
 
 
-API_URL = os.getenv("API_BASE_URL", "http://localhost:8001")
+API_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 st.set_page_config(page_title="Full Fintech Banking Platform", page_icon="🏦", layout="wide")
 
