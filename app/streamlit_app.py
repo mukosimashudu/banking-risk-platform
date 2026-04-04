@@ -76,15 +76,31 @@ def normalise_records(data: Any) -> list[dict]:
 
 
 def api_get(path: str):
-    response = requests.get(f"{API_BASE_URL}{path}", timeout=60)
+    url = f"{API_BASE_URL}{path}"
+    response = requests.get(url, timeout=60)
     response.raise_for_status()
     return response.json()
 
 
 def api_post(path: str, payload: Dict[str, Any]):
-    response = requests.post(f"{API_BASE_URL}{path}", json=payload, timeout=180)
+    url = f"{API_BASE_URL}{path}"
+    response = requests.post(url, json=payload, timeout=180)
     response.raise_for_status()
     return response.json()
+
+
+def safe_api_get(path: str, default: Any):
+    try:
+        return api_get(path)
+    except Exception:
+        return default
+
+
+def safe_api_post(path: str, payload: Dict[str, Any], default: Any):
+    try:
+        return api_post(path, payload)
+    except Exception:
+        return default
 
 
 def plot_horizontal_bar(df: pd.DataFrame, category_col: str, value_col: str, title: str):
@@ -105,7 +121,7 @@ def plot_horizontal_bar(df: pd.DataFrame, category_col: str, value_col: str, tit
 
 
 def render_alert_banner(alert_df: pd.DataFrame):
-    if alert_df.empty:
+    if alert_df.empty or "alert_level" not in alert_df.columns:
         st.success("No critical fraud alerts at the moment.")
         return
 
@@ -146,6 +162,25 @@ def recent_delta_text(current_value: float | int, base_value: float | int) -> st
         return "n/a"
 
 
+def build_summary_defaults() -> dict:
+    return {
+        "total_applications": 0,
+        "total_approved_cases": 0,
+        "approval_rate": 0.0,
+        "total_lifetime_ecl": 0.0,
+        "total_approved_amount": 0.0,
+        "total_credit_limit": 0.0,
+        "average_pd_12m": 0.0,
+        "average_fraud_score": 0.0,
+        "critical_alerts": 0,
+        "high_alerts": 0,
+        "average_shap_risk_probability": 0.0,
+        "product_distribution": [],
+        "decision_distribution": [],
+        "fraud_distribution": [],
+    }
+
+
 # ---------------------------
 # App header
 # ---------------------------
@@ -178,10 +213,10 @@ with tabs[0]:
     st.subheader("Executive Dashboard")
 
     try:
-        summary = api_get("/api/portfolio/summary")
-        fraud_data = normalise_records(api_get("/api/fraud/recent"))
-        recent_loans = normalise_records(api_get("/api/portfolio/recent"))
-        recent_credit = normalise_records(api_get("/api/credit/recent"))
+        summary = safe_api_get("/api/portfolio/summary", build_summary_defaults())
+        fraud_data = normalise_records(safe_api_get("/api/fraud/recent", []))
+        recent_loans = normalise_records(safe_api_get("/api/portfolio/recent", []))
+        recent_credit = normalise_records(safe_api_get("/api/credit/recent", []))
 
         fraud_df = pd.DataFrame(fraud_data)
         loans_df = pd.DataFrame(recent_loans)
@@ -196,28 +231,25 @@ with tabs[0]:
         if not credit_df.empty:
             credit_df = coerce_datetime(credit_df, ["created_at"])
 
-        # Live alert banner
         if not fraud_df.empty and "alert_level" in fraud_df.columns:
             render_alert_banner(fraud_df)
         else:
             st.info("Fraud monitoring feed is available but no alert rows were returned yet.")
 
-        # KPI block
-        total_applications = safe_int(summary.get("total_applications"))
-        total_approved_cases = safe_int(summary.get("total_approved_cases"))
-        approval_rate = safe_float(summary.get("approval_rate"))
-        total_lifetime_ecl = safe_float(summary.get("total_lifetime_ecl"))
+        total_applications = safe_int(summary.get("total_applications", 0))
+        total_approved_cases = safe_int(summary.get("total_approved_cases", 0))
+        approval_rate = safe_float(summary.get("approval_rate", 0))
+        total_lifetime_ecl = safe_float(summary.get("total_lifetime_ecl", 0))
 
-        total_approved_amount = safe_float(summary.get("total_approved_amount"))
-        total_credit_limit = safe_float(summary.get("total_credit_limit"))
-        average_pd_12m = safe_float(summary.get("average_pd_12m"))
-        average_fraud_score = safe_float(summary.get("average_fraud_score"))
+        total_approved_amount = safe_float(summary.get("total_approved_amount", 0))
+        total_credit_limit = safe_float(summary.get("total_credit_limit", 0))
+        average_pd_12m = safe_float(summary.get("average_pd_12m", 0))
+        average_fraud_score = safe_float(summary.get("average_fraud_score", 0))
 
-        critical_alerts = safe_int(summary.get("critical_alerts"))
-        high_alerts = safe_int(summary.get("high_alerts"))
-        avg_shap = safe_float(summary.get("average_shap_risk_probability"))
+        critical_alerts = safe_int(summary.get("critical_alerts", 0))
+        high_alerts = safe_int(summary.get("high_alerts", 0))
+        avg_shap = safe_float(summary.get("average_shap_risk_probability", 0))
 
-        # Simple interview-ready comparisons
         total_recent = len(loans_df) + len(credit_df)
         approved_recent_loans = 0
         approved_recent_credit = 0
@@ -238,7 +270,14 @@ with tabs[0]:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Applications", f"{total_applications:,}", delta=f"{total_recent:,} recent")
         c2.metric("Approved Cases", f"{total_approved_cases:,}", delta=f"{approved_recent_total:,} recent")
-        c3.metric("Approval Rate", pct(approval_rate), delta=recent_delta_text(approval_rate, recent_approval_rate if recent_approval_rate > 0 else approval_rate))
+        c3.metric(
+            "Approval Rate",
+            pct(approval_rate),
+            delta=recent_delta_text(
+                approval_rate,
+                recent_approval_rate if recent_approval_rate > 0 else approval_rate
+            )
+        )
         c4.metric("Lifetime ECL", money(total_lifetime_ecl))
 
         c5, c6, c7, c8 = st.columns(4)
@@ -482,7 +521,7 @@ with tabs[3]:
     st.subheader("Real-Time Fraud Monitoring")
 
     try:
-        fraud_data = normalise_records(api_get("/api/fraud/recent"))
+        fraud_data = normalise_records(safe_api_get("/api/fraud/recent", []))
         fraud_df = pd.DataFrame(fraud_data)
 
         if fraud_df.empty:
@@ -558,7 +597,7 @@ with tabs[4]:
     with left:
         st.markdown("### Recent Loan Applications")
         try:
-            recent_loans = normalise_records(api_get("/api/portfolio/recent"))
+            recent_loans = normalise_records(safe_api_get("/api/portfolio/recent", []))
             loans_df = pd.DataFrame(recent_loans)
             if loans_df.empty:
                 st.info("No recent loan applications.")
@@ -571,7 +610,7 @@ with tabs[4]:
     with right:
         st.markdown("### Recent Credit Applications")
         try:
-            recent_credit = normalise_records(api_get("/api/credit/recent"))
+            recent_credit = normalise_records(safe_api_get("/api/credit/recent", []))
             credit_df = pd.DataFrame(recent_credit)
             if credit_df.empty:
                 st.info("No recent credit applications.")
