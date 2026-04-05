@@ -1,31 +1,32 @@
-from sqlalchemy import create_engine
 import os
-from urllib.parse import quote_plus
+from openai import OpenAI
 
-DB_SERVER = os.getenv("DB_SERVER")
-DB_DATABASE = os.getenv("DB_DATABASE")
-DB_USERNAME = os.getenv("DB_USERNAME")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
+def generate_explanation(data: dict) -> str:
+    try:
+        api_key = os.getenv("OPENAI_API_KEY")
 
-if not all([DB_SERVER, DB_DATABASE, DB_USERNAME, DB_PASSWORD]):
-    raise ValueError("❌ Missing database environment variables")
+        if not api_key:
+            return "AI explanation unavailable (no API key configured)."
 
-connection_string = (
-    f"DRIVER={{{DB_DRIVER}}};"
-    f"SERVER={DB_SERVER};"
-    f"DATABASE={DB_DATABASE};"
-    f"UID={DB_USERNAME};"
-    f"PWD={DB_PASSWORD};"
-    "Encrypt=yes;"
-    "TrustServerCertificate=yes;"
-    "Connection Timeout=30;"
-)
+        client = OpenAI(api_key=api_key)
 
-params = quote_plus(connection_string)
+        prompt = f"""
+        Explain this credit decision in simple business terms:
 
-engine = create_engine(
-    f"mssql+pyodbc:///?odbc_connect={params}",
-    fast_executemany=True,
-    pool_pre_ping=True
-)
+        Credit Score: {data.get("credit_score")}
+        Income: {data.get("income")}
+        Debt: {data.get("debt")}
+        Decision: {data.get("decision")}
+        Risk: {data.get("risk")}
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception:
+        return "Customer decision based on affordability, credit score and risk thresholds."
