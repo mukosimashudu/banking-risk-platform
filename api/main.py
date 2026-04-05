@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from src.config.db import engine
@@ -18,44 +18,8 @@ app = FastAPI(title="Full Fintech Banking Platform API")
 # =========================================================
 # HELPERS
 # =========================================================
-def to_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except:
-        return default
-
-
-def to_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None or value == "":
-            return default
-        return int(value)
-    except:
-        return default
-
-
-def to_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    return str(value).lower() in {"1", "true", "yes"}
-
-
 def make_reference(prefix: str) -> str:
     return f"{prefix}-{str(uuid.uuid4())[:8].upper()}"
-
-
-def fraud_alert(score: float) -> str:
-    if score >= 0.8:
-        return "Critical"
-    elif score >= 0.5:
-        return "High"
-    elif score >= 0.2:
-        return "Medium"
-    return "Low"
 
 
 # =========================================================
@@ -92,21 +56,6 @@ def init_schema():
         risk_probability FLOAT,
         final_decision NVARCHAR(50),
         llm_explanation NVARCHAR(MAX),
-        created_at DATETIME DEFAULT GETDATE()
-    );
-
-    IF OBJECT_ID('analytics.fact_applications') IS NULL
-    CREATE TABLE analytics.fact_applications (
-        id INT IDENTITY PRIMARY KEY,
-        application_reference NVARCHAR(100),
-        decision_type NVARCHAR(50),
-        product_type NVARCHAR(100),
-        requested_amount FLOAT,
-        approved_amount FLOAT,
-        approved_limit FLOAT,
-        risk_probability FLOAT,
-        fraud_score FLOAT,
-        final_decision NVARCHAR(50),
         created_at DATETIME DEFAULT GETDATE()
     );
     """
@@ -149,13 +98,16 @@ def assess_loan(req: LoanRequest):
     risk = min(0.95, max(0.02, (700 - req.credit_score) / 500 + dti + req.fraud_score))
     decision = "APPROVED" if risk < 0.4 else "DECLINED"
 
-    explanation = generate_explanation({
-        "credit_score": req.credit_score,
-        "income": income,
-        "debt": debt,
-        "decision": decision,
-        "risk": risk
-    })
+    try:
+        explanation = generate_explanation({
+            "credit_score": req.credit_score,
+            "income": income,
+            "debt": debt,
+            "decision": decision,
+            "risk": risk
+        })
+    except:
+        explanation = "Fallback explanation: decision based on risk and affordability."
 
     return {
         "application_reference": make_reference("LOAN"),
@@ -164,6 +116,7 @@ def assess_loan(req: LoanRequest):
         "product_type": "loan",
         "requested_amount": req.requested_amount,
         "approved_amount": req.requested_amount if decision == "APPROVED" else 0,
+        "approved_limit": 0,
         "monthly_payment": req.requested_amount / 12,
         "net_monthly_income": income,
         "existing_debt_payments": debt,
@@ -184,20 +137,26 @@ def assess_credit(req: CreditRequest):
     risk = min(0.95, max(0.02, (700 - req.credit_score) / 500 + dti + req.fraud_score))
     decision = "APPROVED" if risk < 0.4 else "DECLINED"
 
-    explanation = generate_explanation({
-        "credit_score": req.credit_score,
-        "income": income,
-        "debt": debt,
-        "decision": decision,
-        "risk": risk
-    })
+    try:
+        explanation = generate_explanation({
+            "credit_score": req.credit_score,
+            "income": income,
+            "debt": debt,
+            "decision": decision,
+            "risk": risk
+        })
+    except:
+        explanation = "Fallback explanation: decision based on risk and affordability."
 
     return {
         "application_reference": make_reference("CREDIT"),
         "customer_name": req.customer_name,
         "decision_type": "credit",
         "product_type": "credit",
+        "requested_amount": 0,
+        "approved_amount": 0,
         "approved_limit": income * 4 if decision == "APPROVED" else 0,
+        "monthly_payment": 0,
         "net_monthly_income": income,
         "existing_debt_payments": debt,
         "credit_score": req.credit_score,
@@ -212,7 +171,7 @@ def assess_credit(req: CreditRequest):
 # =========================================================
 # SAVE
 # =========================================================
-def save_application(data):
+def save_application(data: Dict):
     if engine is None:
         print("⚠️ DB not available")
         return
@@ -230,8 +189,15 @@ def save_application(data):
     )
     """
 
-    with engine.begin() as conn:
-        conn.execute(text(sql), data)
+    data.setdefault("approved_limit", 0)
+    data.setdefault("approved_amount", 0)
+    data.setdefault("requested_amount", 0)
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql), data)
+    except Exception as e:
+        print(f"DB ERROR: {e}")
 
 
 # =========================================================
@@ -262,10 +228,7 @@ def loan(req: LoanRequest):
         save_application(result)
         return result
     except Exception as e:
-        return {
-            "error": str(e),
-            "message": "Loan processing failed"
-        }
+        return {"error": str(e)}
 
 
 @app.post("/api/credit/assess")
@@ -275,10 +238,8 @@ def credit(req: CreditRequest):
         save_application(result)
         return result
     except Exception as e:
-        return {
-            "error": str(e),
-            "message": "Credit processing failed"
-        }
+        return {"error": str(e)}
+
 
 @app.get("/api/portfolio/summary")
 def summary():
@@ -290,8 +251,10 @@ def summary():
            SUM(CASE WHEN final_decision='APPROVED' THEN 1 ELSE 0 END) as approved
     FROM ml.prediction_log
     """
+
     with engine.connect() as conn:
         row = conn.execute(text(sql)).fetchone()
+
     return {"total": row[0], "approved": row[1]}
 
 
@@ -301,8 +264,10 @@ def recent_loans():
         return []
 
     sql = "SELECT TOP 10 * FROM ml.prediction_log WHERE decision_type='loan' ORDER BY id DESC"
+
     with engine.connect() as conn:
         rows = conn.execute(text(sql)).mappings().all()
+
     return list(rows)
 
 
@@ -312,26 +277,8 @@ def recent_credit():
         return []
 
     sql = "SELECT TOP 10 * FROM ml.prediction_log WHERE decision_type='credit' ORDER BY id DESC"
+
     with engine.connect() as conn:
         rows = conn.execute(text(sql)).mappings().all()
+
     return list(rows)
-
-
-@app.get("/api/portfolio/product-distribution")
-def product():
-    return []
-
-
-@app.get("/api/portfolio/decision-distribution")
-def decision():
-    return []
-
-
-@app.get("/api/portfolio/fraud-distribution")
-def fraud():
-    return []
-
-
-@app.get("/api/fraud/live")
-def fraud_live():
-    return []
