@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pandas as pd
 import plotly.express as px
@@ -382,7 +382,6 @@ with tabs[0]:
                 x="product",
                 y="count",
                 text="count",
-                title=None,
             )
             fig.update_layout(template="plotly_dark", height=350)
             st.plotly_chart(fig, use_container_width=True)
@@ -431,13 +430,13 @@ with tabs[1]:
             ["personal_loan", "vehicle_finance", "home_loan", "business_loan"],
             key="loan_product_type",
         )
-        loan_requested_amount = st.number_input("Requested Amount (R)", min_value=0.0, value=150000.0, step=1000.0)
+        loan_requested_amount = st.number_input("Requested Amount (R)", min_value=0.0, value=1500000.0, step=1000.0)
         loan_interest = st.number_input("Annual Interest Rate (%)", min_value=0.0, value=15.5, step=0.1)
         loan_term_months = st.number_input("Term (Months)", min_value=1, value=60, step=1)
         loan_affordability = st.slider("Affordability Factor", 0.10, 1.00, 0.70, 0.01)
 
     with c2:
-        loan_income = st.number_input("Net Monthly Income (R)", min_value=0.0, value=35000.0, step=500.0)
+        loan_income = st.number_input("Net Monthly Income (R)", min_value=0.0, value=85000.0, step=500.0)
         loan_expenses = st.number_input("Monthly Expenses (R)", min_value=0.0, value=12000.0, step=500.0)
         loan_existing_debt = st.number_input("Existing Debt Payments (R)", min_value=0.0, value=3500.0, step=100.0)
         loan_credit_score = st.slider("Credit Score", 300, 900, 680, 1)
@@ -537,13 +536,25 @@ with tabs[2]:
         )
 
     with c2:
-        credit_income = st.number_input("Net Monthly Income (R)", min_value=0.0, value=28000.0, step=500.0, key="credit_income")
-        credit_debt = st.number_input("Existing Debt Payments (R)", min_value=0.0, value=2500.0, step=100.0, key="credit_debt")
+        credit_income = st.number_input(
+            "Net Monthly Income (R)",
+            min_value=0.0,
+            value=38000.0,
+            step=500.0,
+            key="credit_income",
+        )
+        credit_debt = st.number_input(
+            "Existing Debt Payments (R)",
+            min_value=0.0,
+            value=2500.0,
+            step=100.0,
+            key="credit_debt",
+        )
         credit_score = st.slider("Credit Score", 300, 900, 640, 1, key="credit_score")
 
     with c3:
         credit_fraud = st.slider("Fraud Score", 0.0, 1.0, 0.05, 0.01, key="credit_fraud")
-        credit_dpd =        credit_dpd = st.number_input("Days Past Due", min_value=0, value=0, step=1, key="credit_dpd")
+        credit_dpd = st.number_input("Days Past Due", min_value=0, value=0, step=1, key="credit_dpd")
 
     if st.button("Run Credit Assessment", key="run_credit_assessment"):
         payload = {
@@ -605,8 +616,8 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Real-Time Fraud Monitoring")
 
-    if not fraud_live_df.empty:
-        critical = len(fraud_live_df[fraud_live_df.get("alert_level") == "Critical"])
+    if not fraud_live_df.empty and "alert_level" in fraud_live_df.columns:
+        critical = len(fraud_live_df[fraud_live_df["alert_level"] == "Critical"])
     else:
         critical = 0
 
@@ -619,19 +630,21 @@ with tabs[3]:
     col1, col2, col3, col4 = st.columns(4)
 
     col1.metric("Events", len(fraud_live_df))
-    col2.metric("Critical", int((fraud_live_df["alert_level"] == "Critical").sum()) if not fraud_live_df.empty else 0)
-    col3.metric("High", int((fraud_live_df["alert_level"] == "High").sum()) if not fraud_live_df.empty else 0)
-    col4.metric("Average Fraud Score", fmt_percent(fraud_live_df["fraud_score"].mean() if not fraud_live_df.empty else 0))
+    col2.metric("Critical", int((fraud_live_df["alert_level"] == "Critical").sum()) if not fraud_live_df.empty and "alert_level" in fraud_live_df.columns else 0)
+    col3.metric("High", int((fraud_live_df["alert_level"] == "High").sum()) if not fraud_live_df.empty and "alert_level" in fraud_live_df.columns else 0)
+    col4.metric("Average Fraud Score", fmt_percent(fraud_live_df["fraud_score"].mean() if not fraud_live_df.empty and "fraud_score" in fraud_live_df.columns else 0))
 
     st.markdown("### Alert Level Distribution")
-    if not fraud_live_df.empty:
+    if not fraud_live_df.empty and "alert_level" in fraud_live_df.columns:
         fig = px.histogram(fraud_live_df, x="alert_level")
         fig.update_layout(template="plotly_dark", height=350)
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("### Fraud Score Trend")
-    if not fraud_live_df.empty:
-        fig = px.line(fraud_live_df, y="fraud_score")
+    if not fraud_live_df.empty and "fraud_score" in fraud_live_df.columns:
+        plot_df = fraud_live_df.copy()
+        plot_df = plot_df.reset_index(drop=True)
+        fig = px.line(plot_df, x=plot_df.index, y="fraud_score")
         fig.update_layout(template="plotly_dark", height=350)
         st.plotly_chart(fig, use_container_width=True)
 
