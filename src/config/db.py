@@ -1,32 +1,62 @@
+from __future__ import annotations
+
 import os
-from openai import OpenAI
+from urllib.parse import quote_plus
 
-def generate_explanation(data: dict) -> str:
-    try:
-        api_key = os.getenv("OPENAI_API_KEY")
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
-        if not api_key:
-            return "AI explanation unavailable (no API key configured)."
 
-        client = OpenAI(api_key=api_key)
+DB_SERVER = os.getenv("DB_SERVER")
+DB_DATABASE = os.getenv("DB_DATABASE")
+DB_USERNAME = os.getenv("DB_USERNAME")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_DRIVER = os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server")
 
-        prompt = f"""
-        Explain this credit decision in simple business terms:
 
-        Credit Score: {data.get("credit_score")}
-        Income: {data.get("income")}
-        Debt: {data.get("debt")}
-        Decision: {data.get("decision")}
-        Risk: {data.get("risk")}
-        """
+def build_engine() -> Engine | None:
+    """
+    Build and return a SQLAlchemy engine for Azure SQL Server.
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150
+    Returns None if required environment variables are missing so that the app
+    can still start and expose useful health/debug messages instead of crashing
+    at import time.
+    """
+    required = {
+        "DB_SERVER": DB_SERVER,
+        "DB_DATABASE": DB_DATABASE,
+        "DB_USERNAME": DB_USERNAME,
+        "DB_PASSWORD": DB_PASSWORD,
+    }
+
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        print(
+            "⚠️ Database engine not created. Missing environment variables: "
+            + ", ".join(missing)
         )
+        return None
 
-        return response.choices[0].message.content.strip()
+    connection_string = (
+        f"DRIVER={{{DB_DRIVER}}};"
+        f"SERVER={DB_SERVER};"
+        f"DATABASE={DB_DATABASE};"
+        f"UID={DB_USERNAME};"
+        f"PWD={DB_PASSWORD};"
+        "Encrypt=yes;"
+        "TrustServerCertificate=yes;"
+        "Connection Timeout=30;"
+    )
 
-    except Exception:
-        return "Customer decision based on affordability, credit score and risk thresholds."
+    params = quote_plus(connection_string)
+
+    return create_engine(
+        f"mssql+pyodbc:///?odbc_connect={params}",
+        fast_executemany=True,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        future=True,
+    )
+
+
+engine = build_engine()
