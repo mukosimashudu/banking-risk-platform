@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
@@ -115,13 +115,14 @@ def safe_llm_explanation(
                 "debt": debt,
                 "decision": decision,
                 "risk": risk,
+                "decision_type": decision_type,
             }
         )
         if not explanation:
             return fallback
         if "insufficient_quota" in str(explanation).lower():
             return fallback
-        return explanation
+        return str(explanation)
     except Exception:
         return fallback
 
@@ -148,10 +149,76 @@ def ensure_data_keys(data: Dict[str, Any]) -> Dict[str, Any]:
         "ecl_lifetime": 0.0,
         "final_decision": None,
         "llm_explanation": "",
+        "created_at": None,
+        "alert_level": "Low",
     }
     for key, value in defaults.items():
         data.setdefault(key, value)
     return data
+
+
+def get_existing_columns(schema_name: str, table_name: str) -> List[str]:
+    if engine is None:
+        return []
+
+    sql = text(
+        """
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = :schema_name
+          AND TABLE_NAME = :table_name
+        ORDER BY ORDINAL_POSITION
+        """
+    )
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                sql,
+                {"schema_name": schema_name, "table_name": table_name},
+            ).fetchall()
+        return [row[0] for row in rows]
+    except Exception:
+        return []
+
+
+def dynamic_insert(schema_name: str, table_name: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    if engine is None:
+        return {"saved": False, "message": "Database engine is not configured."}
+
+    columns = get_existing_columns(schema_name, table_name)
+    if not columns:
+        return {"saved": False, "message": f"Table {schema_name}.{table_name} was not found."}
+
+    insertable_columns = [col for col in columns if col in data]
+    if "created_at" in columns:
+        insertable_columns = [col for col in insertable_columns if col != "created_at"]
+
+    if not insertable_columns:
+        return {"saved": False, "message": f"No matching columns found for {schema_name}.{table_name}."}
+
+    column_sql = ", ".join(insertable_columns)
+    value_sql = ", ".join([f":{col}" for col in insertable_columns])
+
+    if "created_at" in columns:
+        column_sql = f"{column_sql}, created_at"
+        value_sql = f"{value_sql}, GETDATE()"
+
+    sql = text(
+        f"""
+        INSERT INTO {schema_name}.{table_name} ({column_sql})
+        VALUES ({value_sql})
+        """
+    )
+
+    payload = {col: data.get(col) for col in insertable_columns}
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(sql, payload)
+        return {"saved": True, "message": f"Saved to {schema_name}.{table_name}."}
+    except Exception as exc:
+        return {"saved": False, "message": str(exc)}
 
 
 # =========================================================
@@ -403,116 +470,17 @@ def assess_credit(req: CreditRequest) -> Dict[str, Any]:
 # DATABASE SAVE
 # =========================================================
 def save_application(result: Dict[str, Any]) -> Dict[str, Any]:
-    if engine is None:
-        return {"saved": False, "message": "Database engine is not configured."}
-
     data = ensure_data_keys(result.copy())
 
-    sql = """
-    INSERT INTO ml.prediction_log (
-        application_reference,
-        customer_name,
-        decision_type,
-        product_type,
-        requested_amount,
-        approved_amount,
-        approved_limit,
-        monthly_payment,
-        net_monthly_income,
-        monthly_expenses,
-        existing_debt_payments,
-        credit_score,
-        debt_to_income_ratio,
-        fraud_score,
-        risk_probability,
-        probability_default,
-        ifrs9_stage,
-        ecl_lifetime,
-        final_decision,
-        llm_explanation,
-        created_at
-    )
-    VALUES (
-        :application_reference,
-        :customer_name,
-        :decision_type,
-        :product_type,
-        :requested_amount,
-        :approved_amount,
-        :approved_limit,
-        :monthly_payment,
-        :net_monthly_income,
-        :monthly_expenses,
-        :existing_debt_payments,
-        :credit_score,
-        :debt_to_income_ratio,
-        :fraud_score,
-        :risk_probability,
-        :probability_default,
-        :ifrs9_stage,
-        :ecl_lifetime,
-        :final_decision,
-        :llm_explanation,
-        GETDATE()
-    )
-    """
+    log_status = dynamic_insert("ml", "prediction_log", data)
+    fact_status = dynamic_insert("analytics", "fact_applications", data)
 
-    fact_sql = """
-    INSERT INTO analytics.fact_applications (
-        application_reference,
-        customer_name,
-        decision_type,
-        product_type,
-        requested_amount,
-        approved_amount,
-        approved_limit,
-        monthly_payment,
-        net_monthly_income,
-        monthly_expenses,
-        existing_debt_payments,
-        credit_score,
-        debt_to_income_ratio,
-        fraud_score,
-        risk_probability,
-        probability_default,
-        ifrs9_stage,
-        ecl_lifetime,
-        final_decision,
-        llm_explanation,
-        created_at
-    )
-    VALUES (
-        :application_reference,
-        :customer_name,
-        :decision_type,
-        :product_type,
-        :requested_amount,
-        :approved_amount,
-        :approved_limit,
-        :monthly_payment,
-        :net_monthly_income,
-        :monthly_expenses,
-        :existing_debt_payments,
-        :credit_score,
-        :debt_to_income_ratio,
-        :fraud_score,
-        :risk_probability,
-        :probability_default,
-        :ifrs9_stage,
-        :ecl_lifetime,
-        :final_decision,
-        :llm_explanation,
-        GETDATE()
-    )
-    """
-
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(sql), data)
-            conn.execute(text(fact_sql), data)
-        return {"saved": True, "message": "Application saved successfully."}
-    except Exception as e:
-        return {"saved": False, "message": str(e)}
+    overall_saved = log_status.get("saved") or fact_status.get("saved")
+    return {
+        "saved": bool(overall_saved),
+        "ml_prediction_log": log_status,
+        "analytics_fact_applications": fact_status,
+    }
 
 
 # =========================================================
@@ -532,23 +500,21 @@ def health():
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return {"status": "ok", "database": "connected"}
-    except Exception as e:
-        return {"status": "error", "database": str(e)}
+    except Exception as exc:
+        return {"status": "error", "database": str(exc)}
 
 
 @app.post("/api/loan/assess")
 def loan_assess(req: LoanRequest):
     result = assess_loan(req)
-    save_status = save_application(result)
-    result["save_status"] = save_status
+    result["save_status"] = save_application(result)
     return result
 
 
 @app.post("/api/credit/assess")
 def credit_assess(req: CreditRequest):
     result = assess_credit(req)
-    save_status = save_application(result)
-    result["save_status"] = save_status
+    result["save_status"] = save_application(result)
     return result
 
 
@@ -561,8 +527,8 @@ def portfolio_summary():
         with engine.connect() as conn:
             row = conn.execute(text("SELECT * FROM analytics.v_portfolio_summary")).mappings().first()
         return dict(row) if row else {}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.get("/api/portfolio/recent-loans")
@@ -573,9 +539,9 @@ def recent_loans():
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM analytics.v_recent_loans")).mappings().all()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        return {"error": str(e)}
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.get("/api/portfolio/recent-credit")
@@ -587,8 +553,9 @@ def recent_credit():
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM analytics.v_recent_credit")).mappings().all()
         return [dict(r) for r in rows]
-    except Exception as e:
-        return {"error": str(e)}
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.get("/api/portfolio/product-distribution")
@@ -599,9 +566,9 @@ def product_distribution():
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM analytics.v_product_distribution")).mappings().all()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        return {"error": str(e)}
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.get("/api/portfolio/decision-distribution")
@@ -612,9 +579,9 @@ def decision_distribution():
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM analytics.v_decision_distribution")).mappings().all()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        return {"error": str(e)}
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.get("/api/portfolio/fraud-distribution")
@@ -625,9 +592,9 @@ def fraud_distribution():
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM analytics.v_fraud_distribution")).mappings().all()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        return {"error": str(e)}
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.get("/api/fraud/live")
@@ -638,7 +605,7 @@ def fraud_live():
     sql = """
     SELECT TOP 100
         application_reference AS TransactionID,
-        ISNULL(requested_amount, approved_limit) AS TransactionAmt,
+        ISNULL(NULLIF(requested_amount, 0), approved_limit) AS TransactionAmt,
         CASE WHEN fraud_score >= 0.50 THEN 1 ELSE 0 END AS isFraud,
         created_at AS event_time,
         CASE
@@ -647,7 +614,10 @@ def fraud_live():
             WHEN ISNULL(fraud_score, 0) >= 0.20 THEN 'Medium'
             ELSE 'Low'
         END AS alert_level,
-        fraud_score
+        fraud_score,
+        customer_name,
+        decision_type,
+        final_decision
     FROM ml.prediction_log
     ORDER BY created_at DESC
     """
@@ -655,9 +625,9 @@ def fraud_live():
     try:
         with engine.connect() as conn:
             rows = conn.execute(text(sql)).mappings().all()
-        return [dict(r) for r in rows]
-    except Exception as e:
-        return {"error": str(e)}
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.get("/api/explain/{application_reference}")
@@ -691,7 +661,10 @@ def get_application_explanation(application_reference: str):
 
     try:
         with engine.connect() as conn:
-            row = conn.execute(text(sql), {"application_reference": application_reference}).mappings().first()
+            row = conn.execute(
+                text(sql),
+                {"application_reference": application_reference},
+            ).mappings().first()
 
         if not row:
             return {"error": "Application not found."}
@@ -708,8 +681,8 @@ def get_application_explanation(application_reference: str):
         data["explainability"] = explainability
         data["alert_level"] = fraud_alert_from_score(to_float(data.get("fraud_score")))
         return data
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.post("/api/chat/query")
@@ -723,27 +696,44 @@ def chat_query(payload: ChatQuestion):
         with engine.connect() as conn:
             if "how many rejected" in question or "how many declined" in question:
                 row = conn.execute(
-                    text("""
+                    text(
+                        """
                         SELECT COUNT(*) AS cnt
                         FROM ml.prediction_log
                         WHERE final_decision = 'DECLINED'
-                    """)
+                        """
+                    )
                 ).fetchone()
                 return {"answer": f"There are {row[0]} declined applications."}
 
             if "how many approved" in question:
                 row = conn.execute(
-                    text("""
+                    text(
+                        """
                         SELECT COUNT(*) AS cnt
                         FROM ml.prediction_log
                         WHERE final_decision = 'APPROVED'
-                    """)
+                        """
+                    )
                 ).fetchone()
                 return {"answer": f"There are {row[0]} approved applications."}
 
+            if "how many review" in question:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM ml.prediction_log
+                        WHERE final_decision = 'REVIEW'
+                        """
+                    )
+                ).fetchone()
+                return {"answer": f"There are {row[0]} applications in review."}
+
             if "reasons for rejection" in question or "why were applications rejected" in question:
                 rows = conn.execute(
-                    text("""
+                    text(
+                        """
                         SELECT TOP 10
                             application_reference,
                             customer_name,
@@ -751,7 +741,8 @@ def chat_query(payload: ChatQuestion):
                         FROM ml.prediction_log
                         WHERE final_decision = 'DECLINED'
                         ORDER BY created_at DESC
-                    """)
+                        """
+                    )
                 ).mappings().all()
 
                 if not rows:
@@ -772,8 +763,8 @@ def chat_query(payload: ChatQuestion):
                 "answer": (
                     f"Portfolio summary: total applications {summary['total_applications']}, "
                     f"approved {summary['approved_cases']}, declined {summary['declined_cases']}, "
-                    f"review {summary['review_cases']}, approval rate {round(summary['approval_rate'] * 100, 2)}%."
+                    f"review {summary['review_cases']}, approval rate {summary['approval_rate_pct']}%."
                 )
             }
-    except Exception as e:
-        return {"answer": f"Chat query failed: {str(e)}"}
+    except Exception as exc:
+        return {"answer": f"Chat query failed: {str(exc)}"}
