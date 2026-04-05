@@ -1,35 +1,43 @@
-# src/llm/llm_assistant.py
-
-import os
 from openai import OpenAI
+import os
+
+client = None
+
+try:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        client = OpenAI(api_key=api_key)
+except:
+    client = None
+
 
 def generate_explanation(data: dict) -> str:
+    # ✅ fallback if no API key
+    if client is None:
+        return f"""
+Decision: {data.get('decision')}
+Risk: {round(data.get('risk', 0), 2)}
+Credit Score: {data.get('credit_score')}
+Reason: Based on affordability, credit profile, and risk level.
+"""
+
     try:
-        api_key = os.getenv("OPENAI_API_KEY")
-
-        if not api_key:
-            return "AI explanation unavailable (no API key configured)."
-
-        client = OpenAI(api_key=api_key)
-
         prompt = f"""
-        Explain this credit decision in simple business terms:
+        Explain this credit decision clearly:
 
-        Credit Score: {data.get("credit_score")}
-        Income: {data.get("income")}
-        Debt: {data.get("debt")}
-        Decision: {data.get("decision")}
-        Risk: {data.get("risk")}
+        Credit Score: {data.get('credit_score')}
+        Income: {data.get('income')}
+        Debt: {data.get('debt')}
+        Risk: {data.get('risk')}
+        Decision: {data.get('decision')}
         """
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=150
         )
 
-        return response.choices[0].message.content.strip()
+        return response.choices[0].message.content
 
-    except Exception:
-        # ✅ FALLBACK (VERY IMPORTANT FOR INTERVIEW)
-        return "Customer decision based on affordability, credit score and risk thresholds."
+    except Exception as e:
+        return f"LLM error fallback: {str(e)}"

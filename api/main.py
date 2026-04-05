@@ -257,17 +257,28 @@ def health():
 
 @app.post("/api/loan/assess")
 def loan(req: LoanRequest):
-    result = assess_loan(req)
-    save_application(result)
-    return result
+    try:
+        result = assess_loan(req)
+        save_application(result)
+        return result
+    except Exception as e:
+        return {
+            "error": str(e),
+            "message": "Loan processing failed"
+        }
 
 
 @app.post("/api/credit/assess")
 def credit(req: CreditRequest):
-    result = assess_credit(req)
-    save_application(result)
-    return result
-
+    try:
+        result = assess_credit(req)
+        save_application(result)
+        return result
+    except Exception as e:
+        return {
+            "error": str(e),
+            "message": "Credit processing failed"
+        }
 
 @app.get("/api/portfolio/summary")
 def summary():
