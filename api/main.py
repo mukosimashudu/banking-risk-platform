@@ -48,14 +48,75 @@ def make_reference(prefix: str) -> str:
     return f"{prefix}-{str(uuid.uuid4())[:8].upper()}"
 
 
+# =========================================================
+# BANKING-STYLE FRAUD LOGIC
+# =========================================================
+def normalize_fraud_score(score: float) -> float:
+    """
+    Keeps fraud score within [0, 1].
+    """
+    score = to_float(score)
+    return max(0.0, min(1.0, score))
+
+
 def fraud_alert_from_score(score: float) -> str:
-    if score >= 0.80:
+    """
+    More realistic banking-style segmentation:
+    - Low: majority of cases
+    - Medium: watchlist / soft monitoring
+    - High: manual review
+    - Critical: immediate escalation
+    """
+    score = normalize_fraud_score(score)
+
+    if score >= 0.90:
         return "Critical"
-    if score >= 0.50:
+    if score >= 0.75:
         return "High"
-    if score >= 0.20:
+    if score >= 0.45:
         return "Medium"
     return "Low"
+
+
+def fraud_flag(score: float) -> int:
+    """
+    Binary fraud flag for monitoring endpoint.
+    Only High and Critical count as active fraud alerts.
+    """
+    score = normalize_fraud_score(score)
+    return 1 if score >= 0.75 else 0
+
+
+def fraud_review_required(score: float) -> bool:
+    score = normalize_fraud_score(score)
+    return score >= 0.75
+
+
+def fraud_decline_required(score: float) -> bool:
+    score = normalize_fraud_score(score)
+    return score >= 0.90
+
+
+def fraud_risk_component(score: float) -> float:
+    """
+    Softer contribution of fraud to PD-style score.
+    This prevents fraud from overpowering everything.
+
+    Mapping:
+    - Low band contributes very little
+    - Medium moderate
+    - High meaningful
+    - Critical very strong
+    """
+    score = normalize_fraud_score(score)
+
+    if score < 0.45:
+        return round(score * 0.30, 4)
+    if score < 0.75:
+        return round(0.135 + ((score - 0.45) / 0.30) * 0.20, 4)
+    if score < 0.90:
+        return round(0.335 + ((score - 0.75) / 0.15) * 0.30, 4)
+    return round(0.635 + ((score - 0.90) / 0.10) * 0.20, 4)
 
 
 def ifrs9_stage(days_past_due: int, sicr_flag: bool, default_flag: bool) -> str:
@@ -261,6 +322,118 @@ class CreditRequest(BaseModel):
 class ChatQuestion(BaseModel):
     question: str
 
+class FraudInvestigationRequest(BaseModel):
+    application_reference: str
+
+
+def investigation_recommendation(
+    *,
+    fraud_score: float,
+    final_decision: str,
+    risk_probability: float,
+    credit_score: int,
+    debt_to_income_ratio: float,
+) -> str:
+    fraud_score = normalize_fraud_score(fraud_score)
+    final_decision = str(final_decision or "").upper()
+
+    if fraud_score >= 0.90:
+        return "Immediate block and escalate to fraud operations."
+    if fraud_score >= 0.75:
+        return "Hold transaction for manual review by fraud analyst."
+    if final_decision == "DECLINED":
+        return "Do not proceed. Recheck customer profile and supporting documents."
+    if risk_probability >= 0.60:
+        return "Escalate for credit and fraud review before any approval."
+    if credit_score < 580 or debt_to_income_ratio > 0.50:
+        return "Request enhanced due diligence and affordability validation."
+    return "Low fraud concern. Continue with standard monitoring controls."
+
+
+def build_fraud_investigation_report(row: Dict[str, Any]) -> Dict[str, Any]:
+    fraud_score = normalize_fraud_score(row.get("fraud_score"))
+    credit_score = to_int(row.get("credit_score"))
+    risk_probability = to_float(row.get("risk_probability"))
+    pd_value = to_float(row.get("probability_default"))
+    dti = to_float(row.get("debt_to_income_ratio"))
+    requested_amount = to_float(row.get("requested_amount"))
+    approved_amount = to_float(row.get("approved_amount"))
+    approved_limit = to_float(row.get("approved_limit"))
+    transaction_amount = max(requested_amount, approved_amount, approved_limit)
+    alert_level = fraud_alert_from_score(fraud_score)
+    final_decision = str(row.get("final_decision", "UNKNOWN"))
+    stage = str(row.get("ifrs9_stage", "Stage 1"))
+
+    explainability = build_explainability_features(
+        credit_score=credit_score,
+        debt_to_income_ratio=dti,
+        income=to_float(row.get("net_monthly_income")),
+        fraud_score=fraud_score,
+        amount=transaction_amount,
+    )
+
+    top_drivers = explainability[:3]
+    driver_lines = []
+    for item in top_drivers:
+        impact = float(item.get("impact", 0))
+        direction = "increased" if impact >= 0 else "reduced"
+        driver_lines.append(
+            f"- {item.get('feature')}: {abs(impact):.3f} {direction} the overall risk signal."
+        )
+
+    recommendation = investigation_recommendation(
+        fraud_score=fraud_score,
+        final_decision=final_decision,
+        risk_probability=risk_probability,
+        credit_score=credit_score,
+        debt_to_income_ratio=dti,
+    )
+
+    narrative = (
+        f"Fraud investigation summary for {row.get('application_reference')}. "
+        f"Customer {row.get('customer_name')} submitted a {row.get('decision_type')} application "
+        f"for product {row.get('product_type')}. "
+        f"The transaction amount under review is R {transaction_amount:,.2f}. "
+        f"Fraud score is {fraud_score:.2f}, which maps to a {alert_level} fraud alert. "
+        f"Credit score is {credit_score}, debt-to-income ratio is {dti:.2f}, "
+        f"probability of default is {pd_value:.2%}, overall risk probability is {risk_probability:.2%}, "
+        f"and IFRS 9 stage is {stage}. "
+        f"The current platform decision is {final_decision}. "
+        f"Recommended action: {recommendation}"
+    )
+
+    llm_summary = safe_llm_explanation(
+        decision_type=str(row.get("decision_type", "application")),
+        credit_score=credit_score,
+        income=to_float(row.get("net_monthly_income")),
+        debt=to_float(row.get("existing_debt_payments")),
+        decision=final_decision,
+        risk=risk_probability,
+        dti=dti,
+        fraud_score=fraud_score,
+        stage=stage,
+        top_features=top_drivers,
+    )
+
+    return {
+        "application_reference": row.get("application_reference"),
+        "customer_name": row.get("customer_name"),
+        "decision_type": row.get("decision_type"),
+        "product_type": row.get("product_type"),
+        "transaction_amount": round(transaction_amount, 2),
+        "fraud_score": round(fraud_score, 4),
+        "alert_level": alert_level,
+        "credit_score": credit_score,
+        "debt_to_income_ratio": round(dti, 4),
+        "risk_probability": round(risk_probability, 4),
+        "probability_default": round(pd_value, 4),
+        "ifrs9_stage": stage,
+        "final_decision": final_decision,
+        "recommendation": recommendation,
+        "top_risk_drivers": top_drivers,
+        "investigation_summary": narrative,
+        "llm_summary": llm_summary,
+    }
 
 # =========================================================
 # SCORING ENGINES
@@ -273,7 +446,7 @@ def assess_loan(req: LoanRequest) -> Dict[str, Any]:
     annual_interest_rate = to_float(req.annual_interest_rate)
     term_months = max(1, to_int(req.term_months, 60))
     credit_score = to_int(req.credit_score)
-    fraud_score = to_float(req.fraud_score)
+    fraud_score = normalize_fraud_score(req.fraud_score)
     affordability_factor = to_float(req.affordability_factor, 0.70)
     debt_to_income_cap = to_float(req.debt_to_income_cap, 0.45)
     stress_rate_addon = to_float(req.stress_rate_addon, 2.0)
@@ -287,17 +460,17 @@ def assess_loan(req: LoanRequest) -> Dict[str, Any]:
     credit_component = max(0.0, min(1.0, (700 - credit_score) / 500))
     dti_component = min(1.0, dti)
     amount_component = min(1.0, requested_amount / max(income * 12, 1))
-    fraud_component = min(1.0, fraud_score)
+    fraud_component = fraud_risk_component(fraud_score)
 
     risk_probability = round(
         min(
             0.95,
             max(
                 0.02,
-                0.45 * credit_component
+                0.50 * credit_component
                 + 0.25 * dti_component
                 + 0.15 * amount_component
-                + 0.15 * fraud_component,
+                + 0.10 * fraud_component,
             ),
         ),
         4,
@@ -316,7 +489,7 @@ def assess_loan(req: LoanRequest) -> Dict[str, Any]:
     max_affordable_payment = disposable_income * affordability_factor
     stage = ifrs9_stage(days_past_due, sicr_flag, default_flag)
 
-    if fraud_score >= 0.80:
+    if fraud_decline_required(fraud_score):
         final_decision = "DECLINED"
     elif default_flag:
         final_decision = "DECLINED"
@@ -324,9 +497,11 @@ def assess_loan(req: LoanRequest) -> Dict[str, Any]:
         final_decision = "DECLINED"
     elif monthly_payment > max_affordable_payment:
         final_decision = "DECLINED"
-    elif risk_probability >= 0.55:
+    elif risk_probability >= 0.60:
         final_decision = "DECLINED"
-    elif risk_probability >= 0.35:
+    elif fraud_review_required(fraud_score):
+        final_decision = "REVIEW"
+    elif risk_probability >= 0.40:
         final_decision = "REVIEW"
     else:
         final_decision = "APPROVED"
@@ -386,7 +561,7 @@ def assess_credit(req: CreditRequest) -> Dict[str, Any]:
     income = to_float(req.net_monthly_income)
     debt = to_float(req.existing_debt_payments)
     credit_score = to_int(req.credit_score)
-    fraud_score = to_float(req.fraud_score)
+    fraud_score = normalize_fraud_score(req.fraud_score)
     days_past_due = to_int(req.days_past_due)
     sicr_flag = to_bool(req.sicr_flag)
     default_flag = to_bool(req.default_flag)
@@ -394,22 +569,32 @@ def assess_credit(req: CreditRequest) -> Dict[str, Any]:
     dti = debt / income if income > 0 else 1.0
     credit_component = max(0.0, min(1.0, (700 - credit_score) / 500))
     dti_component = min(1.0, dti)
-    fraud_component = min(1.0, fraud_score)
+    fraud_component = fraud_risk_component(fraud_score)
 
     risk_probability = round(
-        min(0.95, max(0.02, 0.55 * credit_component + 0.25 * dti_component + 0.20 * fraud_component)),
+        min(
+            0.95,
+            max(
+                0.02,
+                0.60 * credit_component
+                + 0.25 * dti_component
+                + 0.15 * fraud_component,
+            ),
+        ),
         4,
     )
     probability_default = risk_probability
     stage = ifrs9_stage(days_past_due, sicr_flag, default_flag)
 
-    if fraud_score >= 0.80:
+    if fraud_decline_required(fraud_score):
         final_decision = "DECLINED"
     elif default_flag:
         final_decision = "DECLINED"
-    elif risk_probability >= 0.55:
+    elif risk_probability >= 0.60:
         final_decision = "DECLINED"
-    elif risk_probability >= 0.35:
+    elif fraud_review_required(fraud_score):
+        final_decision = "REVIEW"
+    elif risk_probability >= 0.40:
         final_decision = "REVIEW"
     else:
         final_decision = "APPROVED"
@@ -553,7 +738,6 @@ def recent_credit():
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT * FROM analytics.v_recent_credit")).mappings().all()
         return [dict(r) for r in rows]
-        return [dict(r) for r in rows]
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -606,12 +790,15 @@ def fraud_live():
     SELECT TOP 100
         application_reference AS TransactionID,
         ISNULL(NULLIF(requested_amount, 0), approved_limit) AS TransactionAmt,
-        CASE WHEN fraud_score >= 0.50 THEN 1 ELSE 0 END AS isFraud,
+        CASE
+            WHEN ISNULL(fraud_score, 0) >= 0.75 THEN 1
+            ELSE 0
+        END AS isFraud,
         created_at AS event_time,
         CASE
-            WHEN ISNULL(fraud_score, 0) >= 0.80 THEN 'Critical'
-            WHEN ISNULL(fraud_score, 0) >= 0.50 THEN 'High'
-            WHEN ISNULL(fraud_score, 0) >= 0.20 THEN 'Medium'
+            WHEN ISNULL(fraud_score, 0) >= 0.90 THEN 'Critical'
+            WHEN ISNULL(fraud_score, 0) >= 0.75 THEN 'High'
+            WHEN ISNULL(fraud_score, 0) >= 0.45 THEN 'Medium'
             ELSE 'Low'
         END AS alert_level,
         fraud_score,
@@ -684,6 +871,53 @@ def get_application_explanation(application_reference: str):
     except Exception as exc:
         return {"error": str(exc)}
 
+@app.post("/api/fraud/investigate")
+def investigate_fraud(payload: FraudInvestigationRequest):
+    if engine is None:
+        return {"error": "Database engine is not configured."}
+
+    sql = """
+    SELECT TOP 1
+        application_reference,
+        customer_name,
+        decision_type,
+        product_type,
+        requested_amount,
+        approved_amount,
+        approved_limit,
+        monthly_payment,
+        net_monthly_income,
+        monthly_expenses,
+        existing_debt_payments,
+        credit_score,
+        debt_to_income_ratio,
+        fraud_score,
+        risk_probability,
+        probability_default,
+        ifrs9_stage,
+        final_decision,
+        llm_explanation,
+        created_at
+    FROM ml.prediction_log
+    WHERE application_reference = :application_reference
+    ORDER BY created_at DESC
+    """
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(sql),
+                {"application_reference": payload.application_reference},
+            ).mappings().first()
+
+        if not row:
+            return {"error": "Application reference not found."}
+
+        result = build_fraud_investigation_report(dict(row))
+        return result
+
+    except Exception as exc:
+        return {"error": str(exc)}
 
 @app.post("/api/chat/query")
 def chat_query(payload: ChatQuestion):

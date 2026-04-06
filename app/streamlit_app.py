@@ -310,6 +310,8 @@ fraud_df = to_dataframe(fraud_distribution)
 fraud_live_df = to_dataframe(fraud_live)
 
 
+
+
 # =========================================================
 # HEADER
 # =========================================================
@@ -654,7 +656,92 @@ with tabs[3]:
     else:
         st.info("No fraud events yet.")
 
+# =========================================================
+# AI FRAUD INVESTIGATION
+# =========================================================
+st.markdown("### AI Fraud Investigation Assistant")
 
+investigation_options = []
+if not fraud_live_df.empty and "TransactionID" in fraud_live_df.columns:
+    investigation_options = fraud_live_df["TransactionID"].dropna().astype(str).tolist()
+
+selected_reference = st.selectbox(
+    "Select Application Reference",
+    options=[""] + investigation_options,
+    key="fraud_investigation_reference",
+)
+
+manual_reference = st.text_input(
+    "Or enter Application Reference manually",
+    value="",
+    key="fraud_manual_reference",
+)
+
+reference_to_investigate = manual_reference.strip() or selected_reference.strip()
+
+if st.button("Run AI Fraud Investigation", key="run_ai_fraud_investigation"):
+    if not reference_to_investigate:
+        st.warning("Please select or enter an application reference.")
+    else:
+        investigation_result = api_post(
+            "/api/fraud/investigate",
+            {"application_reference": reference_to_investigate},
+            timeout=90,
+        )
+
+        if investigation_result.get("error"):
+            st.error(investigation_result["error"])
+        else:
+            st.markdown(
+                '<div class="success-card">AI fraud investigation completed successfully.</div>',
+                unsafe_allow_html=True,
+            )
+
+            inv1, inv2, inv3, inv4 = st.columns(4)
+            inv1.metric("Reference", investigation_result.get("application_reference", "N/A"))
+            inv2.metric("Alert Level", investigation_result.get("alert_level", "N/A"))
+            inv3.metric("Fraud Score", fmt_percent(investigation_result.get("fraud_score", 0)))
+            inv4.metric("Decision", investigation_result.get("final_decision", "N/A"))
+
+            inv5, inv6, inv7, inv8 = st.columns(4)
+            inv5.metric("Transaction Amount", fmt_currency(investigation_result.get("transaction_amount", 0)))
+            inv6.metric("Credit Score", str(investigation_result.get("credit_score", 0)))
+            inv7.metric("Risk Probability", fmt_percent(investigation_result.get("risk_probability", 0)))
+            inv8.metric("PD", fmt_percent(investigation_result.get("probability_default", 0)))
+
+            st.markdown("### Investigation Summary")
+            st.markdown(
+                f'<div class="info-card">{investigation_result.get("investigation_summary", "No summary available.")}</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("### Recommended Action")
+            st.markdown(
+                f'<div class="info-card">{investigation_result.get("recommendation", "No recommendation available.")}</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("### LLM Investigation Commentary")
+            st.markdown(
+                f'<div class="info-card">{investigation_result.get("llm_summary", "No LLM summary available.")}</div>',
+                unsafe_allow_html=True,
+            )
+
+            drivers = investigation_result.get("top_risk_drivers", [])
+            drivers_df = pd.DataFrame(drivers)
+
+            if not drivers_df.empty:
+                st.markdown("### Top Investigation Drivers")
+                fig = px.bar(
+                    drivers_df.sort_values("abs_impact", ascending=True),
+                    x="impact",
+                    y="feature",
+                    orientation="h",
+                    text="impact",
+                    title="Fraud Investigation Drivers",
+                )
+                fig.update_layout(template="plotly_dark", height=380)
+                st.plotly_chart(fig, use_container_width=True)
 # =========================================================
 # TAB 5: RECENT APPLICATIONS
 # =========================================================
