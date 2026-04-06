@@ -350,7 +350,7 @@ with tabs[0]:
     with row1[1]:
         metric_card("Approved Cases", f"{int(summary.get('approved_cases', 0) or 0):,}", "recent")
     with row1[2]:
-        metric_card("Approval Rate", fmt_percent(summary.get("approval_rate", 0)), "live", pill_live=True)
+        metric_card("Approval Rate", fmt_percent(summary.get("approval_rate_pct", 0)), "live", pill_live=True)
     with row1[3]:
         metric_card("Lifetime ECL", fmt_currency(summary.get("lifetime_ecl", 0)))
 
@@ -360,9 +360,9 @@ with tabs[0]:
     with row2[1]:
         metric_card("Credit Limits", fmt_currency(summary.get("credit_limits", 0)))
     with row2[2]:
-        metric_card("Average PD", fmt_percent(summary.get("average_pd", 0)))
+        metric_card("Average PD", fmt_percent(summary.get("avg_pd", 0)))
     with row2[3]:
-        metric_card("Average Fraud Score", fmt_percent(summary.get("average_fraud_score", 0)))
+        metric_card("Average Fraud Score", fmt_percent(summary.get("avg_fraud_score", 0)))
 
     row3 = st.columns(4)
     with row3[0]:
@@ -370,7 +370,7 @@ with tabs[0]:
     with row3[1]:
         metric_card("High Alerts", str(high_alerts))
     with row3[2]:
-        metric_card("Average SHAP Risk", fmt_percent(summary.get("average_shap_risk", 0)))
+        metric_card("Average SHAP Risk", fmt_percent(summary.get("avg_shap_risk", 0)))
     with row3[3]:
         metric_card("Data Refresh", time.strftime("%H:%M:%S"))
 
