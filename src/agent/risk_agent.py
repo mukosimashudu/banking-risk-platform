@@ -24,5 +24,20 @@ def risk_decision_agent(application_reference: str) -> dict:
     return {
         "application_reference": application_reference,
         "recommended_action": action,
-        "analysis": result["llm_analysis"]
+        "recommendation": action,
+        "analysis": result.get("llm_analysis", "No analysis available."),
+        "llm_summary": result.get("llm_analysis", "No analysis available."),
+        "investigation_summary": result.get("llm_analysis", "No investigation summary available."),
+        "final_decision": data.get("final_decision", "UNKNOWN"),
+        "fraud_score": data.get("fraud_score", 0),
+        "risk_probability": data.get("risk_probability", 0),
+        "probability_default": data.get("probability_default", 0),
+        "credit_score": data.get("credit_score", 0),
+        "transaction_amount": max(
+            data.get("requested_amount", 0) or 0,
+            data.get("approved_amount", 0) or 0,
+            data.get("approved_limit", 0) or 0,
+        ),
+        "alert_level": data.get("alert_level", "Low"),
+        "top_risk_drivers": data.get("top_risk_drivers", []),
     }

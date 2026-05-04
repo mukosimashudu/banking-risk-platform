@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from src.config.db import engine
 from src.llm.llm_assistant import generate_explanation
-
+from src.agent.risk_agent import risk_decision_agent
 
 app = FastAPI(title="Full Fintech Banking Platform API")
 
@@ -871,7 +871,7 @@ def get_application_explanation(application_reference: str):
     except Exception as exc:
         return {"error": str(exc)}
 
-@app.post("/api/fraud/investigate")
+@app.post("/api/agent/investigate")
 def investigate_fraud(payload: FraudInvestigationRequest):
     if engine is None:
         return {"error": "Database engine is not configured."}
@@ -916,6 +916,19 @@ def investigate_fraud(payload: FraudInvestigationRequest):
         result = build_fraud_investigation_report(dict(row))
         return result
 
+    except Exception as exc:
+        return {"error": str(exc)}
+
+@app.post("/api/agent/investigate")
+def investigate_agent(payload: dict):
+    ref = payload.get("application_reference")
+
+    if not ref:
+        return {"error": "application_reference is required"}
+
+    try:
+        result = risk_decision_agent(ref)
+        return result
     except Exception as exc:
         return {"error": str(exc)}
 
