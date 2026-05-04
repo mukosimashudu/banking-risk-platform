@@ -684,7 +684,7 @@ if st.button("Run AI Fraud Investigation", key="run_ai_fraud_investigation"):
         st.warning("Please select or enter an application reference.")
     else:
         investigation_result = api_post(
-            "/api/fraud/investigate",
+            "/api/agent/investigate",
             {"application_reference": reference_to_investigate},
             timeout=90,
         )
