@@ -11,6 +11,8 @@ from sqlalchemy import text
 from src.config.db import engine
 from src.llm.llm_assistant import generate_explanation
 from src.agent.risk_agent import risk_decision_agent
+from src.graph.graph_features import get_application_graph_risk
+
 
 app = FastAPI(title="Full Fintech Banking Platform API")
 
@@ -931,6 +933,16 @@ def investigate_agent(payload: dict):
         return result
     except Exception as exc:
         return {"error": str(exc)}
+
+@app.get("/api/graph/risk/{application_reference}")
+def graph_risk(application_reference: str):
+    try:
+        result = get_application_graph_risk(application_reference)
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 
 @app.post("/api/chat/query")
 def chat_query(payload: ChatQuestion):

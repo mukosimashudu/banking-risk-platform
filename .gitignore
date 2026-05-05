@@ -31,3 +31,11 @@ reports/
 # IDE
 .idea/
 .vscode/
+
+# Environment variables and secrets
+.env
+*.env
+.streamlit/secrets.toml
+app/.streamlit/secrets.toml
+secrets.toml
+

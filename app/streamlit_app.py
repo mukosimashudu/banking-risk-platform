@@ -17,6 +17,50 @@ API_BASE_URL = os.getenv(
 
 AUTO_REFRESH_SECONDS = int(os.getenv("AUTO_REFRESH_SECONDS", "30"))
 
+# =========================================================
+# SIMPLE APP LOGIN
+# =========================================================
+def get_secret_value(key: str, default: str = "") -> str:
+    try:
+        return str(st.secrets[key])
+    except Exception:
+        return os.getenv(key, default)
+
+
+def check_login() -> bool:
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    st.markdown("## 🔐 Banking Risk Platform Login")
+
+    expected_username = get_secret_value("APP_USERNAME", "admin")
+    expected_password = get_secret_value("APP_PASSWORD", "")
+
+    if not expected_password:
+        st.error(
+            "APP_PASSWORD is not configured. "
+            "Set it in environment variables locally or in Streamlit Cloud secrets."
+        )
+        st.stop()
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Login", use_container_width=True):
+        if username == expected_username and password == expected_password:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+
+    return False
+
+
+if not check_login():
+    st.stop()
 
 # =========================================================
 # PAGE CONFIG
@@ -218,7 +262,12 @@ if time.time() - st.session_state.last_refresh > AUTO_REFRESH_SECONDS:
 # =========================================================
 # SIDEBAR
 # =========================================================
+
 with st.sidebar:
+    if st.button("Logout", use_container_width=True):
+        st.session_state.authenticated = False
+        st.rerun()
+
     st.markdown("## Configuration")
     st.write(f"**API Base URL:** {API_BASE_URL}")
     st.write(f"**Auto refresh target:** {AUTO_REFRESH_SECONDS} sec")
