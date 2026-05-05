@@ -1,50 +1,108 @@
-# 🏦 Banking Risk Decision System  
-### End-to-End Fraud Detection & Credit Risk Scoring Platform
+# 🏦 Banking Risk Intelligence Platform
 
-## 📌 Business Problem
+A production-style fintech platform that integrates **credit risk modelling, fraud detection, explainable AI, and agentic AI investigation** into a single intelligent decision system.
 
-Financial institutions face two critical challenges:
-- Fraud losses due to undetected transactions
-- Poor credit decisions leading to defaults or lost revenue
+---
 
-This project solves both by combining fraud detection and credit scoring into one intelligent system.
+## 🚀 Live Application
 
-## 💡 Solution
+👉 **Main App (Frontend):**  
+https://banking-risk-platform-mukosi.streamlit.app  
 
-- Machine learning models (XGBoost, RandomForest, Logistic Regression)
-- Real-time API (FastAPI)
-- Interactive dashboard (Streamlit)
-- SQL Server logging + Power BI ready
-- Explainable AI using SHAP
-- Business cost optimization & threshold tuning
+> This is the primary link you should share.
 
-## 🚀 Features
+---
 
-- Fraud Detection + Credit Risk Scoring
-- SHAP Explainability
-- Batch Scoring
-- KPI Dashboard
-- Monitoring
-- MLflow tracking
-- Dockerized deployment
 
-## 🧠 Architecture
+## 🎯 Business Problem
 
-Streamlit → FastAPI → ML Models → SQL Server → Power BI
+Financial institutions must:
+- Assess **creditworthiness**
+- Detect **fraud in real-time**
+- Monitor **portfolio risk exposure**
 
-## 🐳 Run with Docker
+This platform solves all three through a **unified AI-driven decision engine**.
 
-docker compose up --build
+---
 
-## 📊 Outputs
+## 🧠 Core Capabilities
 
-- ROC curves
-- Model comparison charts
-- SHAP plots
-- Business cost analysis
-- Downloadable reports
+- 📊 Credit Risk (PD, IFRS9, ECL)
+- 🚨 Fraud Detection & Alerts
+- 🔍 Explainable AI (SHAP-style insights)
+- 🤖 Agentic AI Investigation
+- 🌐 Graph-Based Fraud Detection
+- 📈 Executive Dashboard
+- 💬 SQL AI Assistant
+
+---
+
+## 📸 Screenshots
+
+### Executive Risk Dashboard
+Real-time monitoring of portfolio KPIs, fraud alerts, and risk distribution.
+
+![Executive Dashboard](images/executive_dashboard.png)
+
+---
+
+### AI Fraud Investigation
+Agent-based AI system performing full fraud and credit risk analysis.
+
+![AI Investigation](images/ai_investigation.png)
+
+---
+
+### Explainable AI Dashboard
+Transparent model decisions with top risk drivers.
+
+![Explainable AI](images/explainable_ai.png)
+
+---
+
+## 🏗️ Architecture
+
+Streamlit (Frontend)  
+→ FastAPI (Backend API)  
+→ Agent Layer (Decision Intelligence)  
+→ ML Models + Graph Engine  
+→ Azure SQL Database  
+→ LLM (Explainability)
+
+---
+
+## 🧰 Tech Stack
+
+- Python
+- FastAPI
+- Streamlit
+- Azure SQL
+- Scikit-learn
+- XGBoost
+- Plotly
+
+---
+
+## 📂 Project Structure
+
+api/ → Backend services  
+app/ → Streamlit frontend  
+src/ → ML, agents, scoring, graph logic  
+
+---
+
+## 🔐 Security
+
+- Environment variables for credentials
+- Secrets excluded from GitHub
+- Streamlit authentication layer implemented
+
+---
 
 ## 👨‍💻 Author
 
 Mashudu Mukosi  
-Data Scientist | ML Engineer | Credit Risk Analyst | AI Engineer
+Data Analyst | Data Scientist | Risk & AI Systems
+
+---
+
